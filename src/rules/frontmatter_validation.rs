@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::{Issue, Rule, Severity};
@@ -10,17 +10,19 @@ use super::{Issue, Rule, Severity};
 ///
 /// - `name` and `description` are required
 /// - `name` is lowercase kebab-case, at most 64 chars, and matches the
-///   containing directory
+///   containing directory (warnings: portability, not security)
 /// - `name`/`description` contain no angle brackets: both are injected into
 ///   the agent's system prompt, so tags there are a prompt-injection vector
 /// - `description` is neither empty, very short, nor over 1024 chars
 /// - `allowed-tools` is not a wildcard and is a string, not a YAML list
 ///
-/// Provider-specific heuristics:
+/// Provider-specific heuristic: `OpenCode` (`location`) mixed with Claude
+/// Code (`hooks`, `model`, `disable-model-invocation`) fields suggests a
+/// misconfigured skill.
 ///
-/// - `OpenCode` (`location`) mixed with Claude Code (`hooks`, `model`,
-///   `disable-model-invocation`) fields suggests a misconfigured skill
-/// - a description that mostly repeats the body may be generated filler
+/// A description/body word-overlap "filler" heuristic was evaluated and
+/// dropped: on real skills it fired on nearly every file, because a good
+/// trigger description naturally reuses the body's vocabulary.
 ///
 /// Only files named `SKILL.md` are checked when a path is known, so ordinary
 /// markdown with frontmatter (docs, blog posts) is not flagged.
@@ -43,11 +45,10 @@ struct Field {
 }
 
 #[derive(Debug)]
-struct Frontmatter<'a> {
+struct Frontmatter {
     /// 0-based line index of the opening `---`.
     open_line: usize,
     fields: BTreeMap<String, Field>,
-    body: &'a str,
 }
 
 /// Returns true for YAML block scalar indicators such as `|`, `>-`, `|+2`.
@@ -67,7 +68,7 @@ fn unquote(value: &str) -> &str {
     v
 }
 
-fn parse_frontmatter(content: &str) -> Option<Frontmatter<'_>> {
+fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
     let lines: Vec<&str> = content.lines().collect();
     if lines.first().map(|l| l.trim()) != Some("---") {
         return None;
@@ -79,15 +80,6 @@ fn parse_frontmatter(content: &str) -> Option<Frontmatter<'_>> {
         .position(|l| l.trim() == "---")
         .map(|p| p + 1);
     let fm_end = close.unwrap_or(lines.len());
-
-    let body = close.map_or("", |close_idx| {
-        let offset: usize = content
-            .split_inclusive('\n')
-            .take(close_idx + 1)
-            .map(str::len)
-            .sum();
-        &content[offset.min(content.len())..]
-    });
 
     let is_continuation = |line: &str| line.trim().is_empty() || line.starts_with([' ', '\t']);
 
@@ -144,7 +136,6 @@ fn parse_frontmatter(content: &str) -> Option<Frontmatter<'_>> {
     Some(Frontmatter {
         open_line: 0,
         fields,
-        body,
     })
 }
 
@@ -158,12 +149,6 @@ fn is_valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn words(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= 5)
-        .map(str::to_lowercase)
-}
-
 fn issue(line_idx: usize, severity: Severity, message: String) -> Issue {
     Issue {
         severity,
@@ -175,7 +160,7 @@ fn issue(line_idx: usize, severity: Severity, message: String) -> Issue {
 }
 
 impl FrontmatterValidationRule {
-    fn validate(fm: &Frontmatter<'_>, dir_name: Option<&str>) -> Vec<Issue> {
+    fn validate(fm: &Frontmatter, dir_name: Option<&str>) -> Vec<Issue> {
         let mut issues = Vec::new();
         let f = &fm.fields;
 
@@ -210,7 +195,7 @@ impl FrontmatterValidationRule {
             Self::check_name(name, dir_name, &mut issues);
         }
         if let Some(description) = f.get("description") {
-            Self::check_description(description, fm.body, &mut issues);
+            Self::check_description(description, &mut issues);
         }
         if let Some(tools) = f.get("allowed-tools") {
             Self::check_allowed_tools(tools, &mut issues);
@@ -244,10 +229,13 @@ impl FrontmatterValidationRule {
 
     fn check_name(name: &Field, dir_name: Option<&str>, issues: &mut Vec<Issue>) {
         let value = name.value.as_str();
+        // A warning, not an error: non-conforming names are a portability
+        // problem (Codex rejects them), not a security one, and many
+        // working OpenCode setups use PascalCase names.
         if !is_valid_name(value) || value.len() > MAX_NAME_LEN {
             issues.push(issue(
                 name.line,
-                Severity::Error,
+                Severity::Warning,
                 format!(
                     "Name '{value}' must be lowercase kebab-case (a-z, 0-9, single hyphens, \
                      no leading/trailing hyphen) and at most {MAX_NAME_LEN} characters"
@@ -265,7 +253,7 @@ impl FrontmatterValidationRule {
         }
     }
 
-    fn check_description(description: &Field, body: &str, issues: &mut Vec<Issue>) {
+    fn check_description(description: &Field, issues: &mut Vec<Issue>) {
         let value = description.value.trim();
         let len = value.chars().count();
         if value.is_empty() {
@@ -293,25 +281,6 @@ impl FrontmatterValidationRule {
                 Severity::Warning,
                 format!("Description is {len} chars; the limit is {MAX_DESCRIPTION_LEN}"),
             ));
-        }
-
-        // Filler heuristic: most significant description words repeated in
-        // the body. Whole-word matching, so "tests" does not match "attests".
-        let desc_words: HashSet<String> = words(value).collect();
-        if desc_words.len() >= 3 && !body.is_empty() {
-            let body_words: HashSet<String> = words(body).collect();
-            let overlap = desc_words.intersection(&body_words).count();
-            if overlap >= 3 && overlap * 2 >= desc_words.len() {
-                issues.push(issue(
-                    description.line,
-                    Severity::Warning,
-                    format!(
-                        "Description shares {overlap}/{} significant words with the body: \
-                         may be generated filler rather than a crafted trigger description",
-                        desc_words.len()
-                    ),
-                ));
-            }
         }
     }
 
@@ -437,7 +406,7 @@ mod tests {
             let content =
                 format!("---\nname: {name}\ndescription: A sufficiently long description\n---\n");
             assert!(
-                has(&check(&content), Severity::Error, "kebab-case"),
+                has(&check(&content), Severity::Warning, "kebab-case"),
                 "name {name} should be rejected"
             );
         }
@@ -502,19 +471,6 @@ mod tests {
     }
 
     #[test]
-    fn description_body_overlap_warns() {
-        let content = "---\nname: filler\ndescription: This skill helps you analyze security vulnerabilities and audit smart contracts thoroughly\n---\n# Security Audit Helper\nThis skill helps you analyze security vulnerabilities in your codebase.\nIt performs thorough auditing of smart contracts and provides detailed reports.\n";
-        assert!(has(&check(content), Severity::Warning, "filler"));
-    }
-
-    #[test]
-    fn overlap_uses_whole_words() {
-        // "tests" inside "attests" / "latests" must not count.
-        let content = "---\nname: a\ndescription: Runs tests, lints sources, checks types\n---\nattests contestsx latests sourcesx typesx\n";
-        assert!(!has(&check(content), Severity::Warning, "filler"));
-    }
-
-    #[test]
     fn check_file_only_applies_to_skill_md() {
         let rule = FrontmatterValidationRule;
         let blog = "---\ntitle: My post\n---\nHello\n";
@@ -547,7 +503,7 @@ mod tests {
     fn unclosed_frontmatter_still_validated() {
         assert!(has(
             &check("---\nname: BadName\n"),
-            Severity::Error,
+            Severity::Warning,
             "kebab-case"
         ));
     }

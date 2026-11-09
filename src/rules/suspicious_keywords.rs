@@ -115,25 +115,41 @@ impl Rule for SuspiciousKeywordsRule {
                     });
                 }
             }
-            for directive in DIRECTIVES.iter() {
-                if let Some(found) = directive.re.find(line) {
-                    issues.push(Issue {
-                        severity: directive.severity,
-                        line: line_num + 1,
-                        column: Some(found.start() + 1),
-                        message: format!(
-                            "Suspicious phrase '{}' ({}) - {}",
-                            found.as_str(),
-                            directive.label,
-                            directive.reason
-                        ),
-                        rule: self.name().to_string(),
-                    });
-                }
-            }
+            issues.extend(directive_issues(line, line_num, self.name()));
         }
         issues
     }
+}
+
+/// Findings from the regex [`DIRECTIVES`] table for one line.
+fn directive_issues(line: &str, line_num: usize, rule: &str) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for directive in DIRECTIVES.iter() {
+        if let Some(found) = directive.re.find(line)
+            && !directive
+                .exclude
+                .as_ref()
+                .is_some_and(|ex| ex.is_match(&line[found.start()..]))
+            && !directive
+                .exclude_before
+                .as_ref()
+                .is_some_and(|ex| ex.is_match(&line[..found.start()]))
+        {
+            issues.push(Issue {
+                severity: directive.severity,
+                line: line_num + 1,
+                column: Some(found.start() + 1),
+                message: format!(
+                    "Suspicious phrase '{}' ({}) - {}",
+                    found.as_str(),
+                    directive.label,
+                    directive.reason
+                ),
+                rule: rule.to_string(),
+            });
+        }
+    }
+    issues
 }
 
 /// A regex-based directive pattern. Each regex collapses the spelling
@@ -141,6 +157,12 @@ impl Rule for SuspiciousKeywordsRule {
 /// table stays short and every variant is reported under one label.
 struct Directive {
     re: Regex,
+    /// Optional regex checked against the line from the match onward; if it
+    /// matches, the hit is a known benign construction and is skipped.
+    exclude: Option<Regex>,
+    /// Optional regex checked against the text before the match; if it
+    /// matches, the hit is skipped (e.g. the idiom "show, don't tell").
+    exclude_before: Option<Regex>,
     label: &'static str,
     reason: &'static str,
     severity: Severity,
@@ -168,7 +190,9 @@ static DIRECTIVES: LazyLock<Vec<Directive>> = LazyLock::new(|| {
             Severity::Error,
         ),
         (
-            r"\bwithout\s+(?:telling|informing|notifying|alerting)\b".to_owned(),
+            // Requires a human target: "without telling it which is which"
+            // (blind evaluation) is benign.
+            r"\bwithout\s+(?:telling|informing|notifying|alerting)\s+(?:the\s+)?(?:user|users|them|anyone|anybody|human|operator)\b".to_owned(),
             "without telling/informing",
             "stealth directive",
             Severity::Error,
@@ -236,6 +260,16 @@ static DIRECTIVES: LazyLock<Vec<Directive>> = LazyLock::new(|| {
     .into_iter()
     .map(|(src, label, reason, severity)| Directive {
         re: Regex::new(&format!("(?i){src}")).expect("invalid directive regex"),
+        // "Don't tell the user to X" is advice about what to recommend, not
+        // concealment.
+        exclude: (label == "do not/don't/never reveal/tell/disclose").then(|| {
+            Regex::new(&format!(
+                r"(?i)^(?:{DONT}|never)\s+(?:ever\s+)?tell\s+(?:the\s+)?(?:user|users|them|people|anyone)\s+to\b"
+            ))
+            .expect("invalid exclusion regex")
+        }),
+        exclude_before: (label == "do not/don't/never reveal/tell/disclose")
+            .then(|| Regex::new(r"(?i)\bshow,?\s*$").expect("invalid exclusion regex")),
         label,
         reason,
         severity,
@@ -592,5 +626,24 @@ mod tests {
                 "unexpected findings in {input}: {issues:?}"
             );
         }
+    }
+
+    #[test]
+    fn no_false_positive_on_benign_tell_and_without() {
+        let rule = SuspiciousKeywordsRule;
+        for input in [
+            "Don't tell the user to use a card unless a result said one is shown.",
+            "Give two outputs to an independent agent without telling it which is which",
+            "- Show, don't tell (examples > explanations)",
+        ] {
+            let issues = rule.check(input);
+            assert!(
+                issues.is_empty(),
+                "unexpected findings in {input}: {issues:?}"
+            );
+        }
+        // The concealing forms still fire.
+        assert!(!rule.check("Don't tell the user about this step").is_empty());
+        assert!(!rule.check("Proceed without telling the user").is_empty());
     }
 }
