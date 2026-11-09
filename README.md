@@ -11,6 +11,18 @@ Skill files are markdown documents that define behaviors and capabilities for AI
 This tool is extremely conservative. It's essentially looking for ASCII markdown files with some allowance for emojis.
 It's unlikely to be friendly for languages other than English.
 
+`skill-issues` performs only simple, static, lint-based checks on the primary skill files (SKILL.md and related markdown). It does not execute, decode, modify, or otherwise interpret file contents beyond pattern matching.
+
+## Non-Goals
+
+The following are explicitly out of scope and will not be implemented:
+
+- **Secret/credential scanning** — detection of API keys, tokens, private keys, or passwords.
+- **Script analysis** — scanning bundled `.py`, `.sh`, `.js`, or `.ts` files in `scripts/` directories for dangerous patterns (HTTP exfiltration, `eval`, credential access, config modification).
+- **Content-aware decoding** — decoding base64 or Unicode tag blocks to inspect their decoded content. Only the presence of encoded strings is detected, not what they contain.
+- **Structural attack detection** — symlink resolution, test file RCE, npm lifecycle hooks, or image metadata injection.
+- **URL extraction and classification** — extracting URLs from skill content or checking domains against allowlists.
+
 ## Installation
 
 ```bash
