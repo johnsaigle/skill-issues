@@ -6,6 +6,7 @@ pub mod excessive_backticks;
 pub mod excessive_length;
 pub mod excessive_whitespace;
 pub mod frontmatter_hooks;
+pub mod frontmatter_validation;
 pub mod high_entropy;
 pub mod html_comments;
 pub mod inline_commands;
@@ -35,6 +36,12 @@ pub struct Issue {
 pub trait Rule: Send + Sync {
     fn name(&self) -> &'static str;
     fn check(&self, content: &str) -> Vec<Issue>;
+
+    /// Like [`Rule::check`], for rules that also need the file's location
+    /// (e.g. to apply only to `SKILL.md` or compare against the directory).
+    fn check_file(&self, _path: &std::path::Path, content: &str) -> Vec<Issue> {
+        self.check(content)
+    }
 }
 
 /// Suspicion level classification based on invisible character density,

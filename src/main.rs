@@ -14,8 +14,9 @@ mod rules;
 use rules::{
     Issue, Rule, Severity, SuspicionLevel, base64_encoded, bundled_scripts,
     compute_suspicion_level, excessive_backticks, excessive_length, excessive_whitespace,
-    frontmatter_hooks, high_entropy, html_comments, inline_commands, invisible_chars,
-    mixed_scripts, non_printable, suspicious_keywords, unicode_homoglyphs, url_encoding,
+    frontmatter_hooks, frontmatter_validation, high_entropy, html_comments, inline_commands,
+    invisible_chars, mixed_scripts, non_printable, suspicious_keywords, unicode_homoglyphs,
+    url_encoding,
 };
 
 #[derive(Parser)]
@@ -135,6 +136,7 @@ impl Linter {
             Box::new(base64_encoded::Base64EncodedRule),
             Box::new(high_entropy::HighEntropyRule),
             Box::new(frontmatter_hooks::FrontmatterHooksRule),
+            Box::new(frontmatter_validation::FrontmatterValidationRule),
             Box::new(inline_commands::InlineCommandsRule),
             Box::new(bundled_scripts::BundledScriptsRule),
             Box::<excessive_length::ExcessiveLengthRule>::default(),
@@ -143,10 +145,14 @@ impl Linter {
         Self { rules }
     }
 
-    fn lint(&self, content: &str) -> Vec<Issue> {
+    /// Runs every rule. `path` is `None` for content without a file (tests).
+    fn lint(&self, path: Option<&Path>, content: &str) -> Vec<Issue> {
         let mut all_issues = Vec::new();
         for rule in &self.rules {
-            all_issues.extend(rule.check(content));
+            all_issues.extend(match path {
+                Some(path) => rule.check_file(path, content),
+                None => rule.check(content),
+            });
         }
         // Sort by line number
         all_issues.sort_by_key(|i| i.line);
@@ -297,6 +303,7 @@ fn generate_sarif(file_results: &[FileResult]) -> sarif::Sarif {
         "invisible-characters",
         "high-entropy",
         "frontmatter-hooks",
+        "frontmatter-validation",
         "inline-commands",
         "bundled-scripts",
         "excessive-length",
@@ -493,7 +500,7 @@ fn main() -> Result<()> {
         .par_iter()
         .filter_map(|path| {
             let content = fs::read_to_string(path).ok()?;
-            let issues = linter.lint(&content);
+            let issues = linter.lint(Some(path), &content);
 
             // Compute suspicion level for invisible character density
             let (suspicion, total_invisible, longest_run) = compute_suspicion_level(&content);
@@ -599,7 +606,7 @@ Invisible: test​word
 High entropy: dQw4w9WgXcQvXhGGXTthx6z8JG4Z3L6vX9T3z7K9P8N
 "#;
 
-        let issues = linter.lint(content);
+        let issues = linter.lint(None, content);
 
         // Should detect multiple types of issues
         let rules_found: Vec<&str> = issues.iter().map(|i| i.rule.as_str()).collect();
@@ -623,7 +630,7 @@ High entropy: dQw4w9WgXcQvXhGGXTthx6z8JG4Z3L6vX9T3z7K9P8N
             include_confusable_spaces: false,
         });
         let content = "Run `./setup.sh` and then `./install.py` to begin.\n";
-        let issues = linter.lint(content);
+        let issues = linter.lint(None, content);
         let rules_found: Vec<&str> = issues.iter().map(|i| i.rule.as_str()).collect();
         assert!(rules_found.contains(&"bundled-scripts"));
         assert!(issues.len() >= 2);
@@ -637,7 +644,7 @@ High entropy: dQw4w9WgXcQvXhGGXTthx6z8JG4Z3L6vX9T3z7K9P8N
             include_confusable_spaces: false,
         });
         let content = "line\n".repeat(600);
-        let issues = linter.lint(&content);
+        let issues = linter.lint(None, &content);
         let rules_found: Vec<&str> = issues.iter().map(|i| i.rule.as_str()).collect();
         assert!(rules_found.contains(&"excessive-length"));
     }
@@ -666,7 +673,7 @@ let x = 5;
 No hidden characters or suspicious content.
 "#;
 
-        let issues = linter.lint(content);
+        let issues = linter.lint(None, content);
         assert!(issues.is_empty());
     }
 
@@ -687,7 +694,7 @@ Line 3
 Line 8 with <!-- another comment -->
 "#;
 
-        let issues = linter.lint(content);
+        let issues = linter.lint(None, content);
         let lines: Vec<usize> = issues.iter().map(|i| i.line).collect();
 
         // Check that lines are in ascending order
