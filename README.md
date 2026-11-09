@@ -11,7 +11,7 @@ Skill files are markdown documents that define behaviors and capabilities for AI
 This tool is extremely conservative. It's essentially looking for ASCII markdown files with some allowance for emojis.
 It's unlikely to be friendly for languages other than English.
 
-`skill-issues` performs only simple, static, lint-based checks on the primary skill files (SKILL.md and related markdown). It does not execute, decode, modify, or otherwise interpret file contents beyond pattern matching.
+`skill-issues` performs only simple, static, lint-based checks on the primary skill files (SKILL.md and related markdown). It does not execute, modify, or otherwise interpret file contents beyond pattern matching (encoded strings are only decoded far enough to confirm they are well-formed; see Non-Goals).
 
 ## Non-Goals
 
