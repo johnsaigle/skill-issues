@@ -20,18 +20,19 @@ impl Rule for Base64EncodedRule {
             for mat in re.find_iter(line) {
                 // Check if it's valid base64
                 if let Ok(decoded) = engine.decode(mat.as_str())
-                    && let Ok(text) = String::from_utf8(decoded) {
-                        issues.push(Issue {
-                            severity: Severity::Warning,
-                            line: line_num + 1,
-                            column: Some(mat.start() + 1),
-                            message: format!(
-                                "Base64 encoded content detected (decoded: '{}'...)",
-                                &text[..text.len().min(30)]
-                            ),
-                            rule: self.name().to_string(),
-                        });
-                    }
+                    && let Ok(text) = String::from_utf8(decoded)
+                {
+                    issues.push(Issue {
+                        severity: Severity::Warning,
+                        line: line_num + 1,
+                        column: Some(mat.start() + 1),
+                        message: format!(
+                            "Base64 encoded content detected (decoded: '{}'...)",
+                            &text[..text.len().min(30)]
+                        ),
+                        rule: self.name().to_string(),
+                    });
+                }
             }
         }
         issues

@@ -16,7 +16,7 @@ pub mod suspicious_keywords;
 pub mod unicode_homoglyphs;
 pub mod url_encoding;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
@@ -77,10 +77,11 @@ pub fn compute_suspicion_level(content: &str) -> (SuspicionLevel, usize, usize) 
         // Skip VS-15/VS-16 after emoji base (standard emoji presentation)
         if is_emoji_variation_selector(ch)
             && let Some(prev) = prev_char
-                && invisible_chars::InvisibleCharactersRule::is_emoji_base(prev) {
-                    prev_char = Some(ch);
-                    continue;
-                }
+            && invisible_chars::InvisibleCharactersRule::is_emoji_base(prev)
+        {
+            prev_char = Some(ch);
+            continue;
+        }
 
         if is_invisible_codepoint(ch) {
             total_invisible += 1;

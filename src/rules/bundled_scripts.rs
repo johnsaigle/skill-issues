@@ -192,16 +192,14 @@ mod tests {
 
     #[test]
     fn no_false_positive_on_markdown_links() {
-        let content =
-            "See [documentation](./README.md) for details.\nSee [config](./config.yaml) for \
+        let content = "See [documentation](./README.md) for details.\nSee [config](./config.yaml) for \
              options.";
         assert!(check(content).is_empty());
     }
 
     #[test]
     fn no_false_positive_on_normal_text() {
-        let content =
-            "We use shell scripts for automation.\nPython is great for scripting.\njavascript \
+        let content = "We use shell scripts for automation.\nPython is great for scripting.\njavascript \
              runs in the browser.\nThe file extension .sh is common.";
         assert!(check(content).is_empty());
     }
