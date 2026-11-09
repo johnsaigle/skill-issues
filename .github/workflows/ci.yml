@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main, master ]
@@ -13,38 +16,44 @@ jobs:
     name: Run unit tests
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: stable
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
   clippy:
     runs-on: ubuntu-latest
     name: Run clippy
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: stable
           components: clippy
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
 
   docker:
     runs-on: ubuntu-latest
     name: Build & smoke-test Docker image
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build image
         run: docker build -t skill-issues:ci .

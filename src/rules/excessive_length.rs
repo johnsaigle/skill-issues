@@ -77,7 +77,7 @@ mod tests {
         assert!(!issues.is_empty());
         let issue = &issues[0];
         assert!(issue.message.contains("501"));
-        assert!(issue.severity == Severity::Warning);
+        assert_eq!(issue.severity, Severity::Warning);
     }
 
     #[test]

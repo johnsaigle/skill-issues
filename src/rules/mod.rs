@@ -148,6 +148,7 @@ fn is_invisible_codepoint(ch: char) -> bool {
 #[cfg(test)]
 mod suspicion_tests {
     use super::*;
+    use std::fmt::Write;
 
     #[test]
     fn clean_text_is_info() {
@@ -170,7 +171,7 @@ mod suspicion_tests {
         // 15 zero-width spaces scattered (total >= 10, runs < 10)
         let mut content = String::new();
         for i in 0..15 {
-            content.push_str(&format!("word{}\u{200B}", i));
+            let _ = write!(content, "word{i}\u{200B}");
         }
         let (level, total, run) = compute_suspicion_level(&content);
         assert_eq!(level, SuspicionLevel::Medium);
@@ -190,7 +191,7 @@ mod suspicion_tests {
     fn over_100_scattered_is_high() {
         let mut content = String::new();
         for i in 0..101 {
-            content.push_str(&format!("w{}\u{200B}", i));
+            let _ = write!(content, "w{i}\u{200B}");
         }
         let (level, total, _) = compute_suspicion_level(&content);
         assert_eq!(level, SuspicionLevel::High);
