@@ -27,7 +27,10 @@ impl InvisibleCharactersRule {
         let cp = ch as u32;
         if (0xE0000..=0xE007F).contains(&cp) {
             // U+E0000 + ascii_code
-            #[expect(clippy::cast_possible_truncation, reason = "Tag codepoints are in range 0xE0000-0xE007F, difference always fits in u8")]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "Tag codepoints are in range 0xE0000-0xE007F, difference always fits in u8"
+            )]
             let ascii_code = (cp - 0xE0000) as u8;
             if ascii_code <= 0x7F {
                 return Some(ascii_code as char);
@@ -247,10 +250,11 @@ impl Rule for InvisibleCharactersRule {
                 // This is standard emoji presentation formatting (e.g. ❤\uFE0F).
                 if Self::is_emoji_variation_selector(ch)
                     && let Some(prev) = prev_char
-                        && Self::is_emoji_base(prev) {
-                            prev_char = Some(ch);
-                            continue;
-                        }
+                    && Self::is_emoji_base(prev)
+                {
+                    prev_char = Some(ch);
+                    continue;
+                }
 
                 // Check for Unicode tag characters
                 if Self::is_unicode_tag(ch) {
@@ -354,9 +358,11 @@ mod tests {
         let issues = rule.check(content);
 
         assert!(!issues.is_empty());
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("ZERO WIDTH SPACE")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("ZERO WIDTH SPACE"))
+        );
     }
 
     #[test]
@@ -366,9 +372,11 @@ mod tests {
         let issues = rule.check(content);
 
         assert!(!issues.is_empty());
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("ZERO WIDTH JOINER")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("ZERO WIDTH JOINER"))
+        );
     }
 
     #[test]
@@ -419,9 +427,11 @@ mod tests {
 
         // Should detect individual tag chars + decoded payload
         assert!(issues.iter().any(|i| i.message.contains("Unicode tag")));
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("Decoded Unicode tag payload: 'Hi'")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("Decoded Unicode tag payload: 'Hi'"))
+        );
     }
 
     #[test]
@@ -432,9 +442,11 @@ mod tests {
         let issues = rule.check(content);
 
         assert!(!issues.is_empty());
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("VARIATION SELECTOR")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("VARIATION SELECTOR"))
+        );
     }
 
     #[test]
@@ -457,14 +469,14 @@ mod tests {
         let rule = InvisibleCharactersRule::new();
         // Test multiple emoji + VS-16 combos that appear in real skill files
         for input in [
-            "✅\u{FE0F} VERIFIED",        // check mark + VS16
-            "⚠\u{FE0F} WARNING",          // warning sign + VS16
-            "❌\u{FE0F} FAILED",           // cross mark + VS16
-            "☁\u{FE0F} cloud",             // cloud + VS16
-            "1\u{FE0F}\u{20E3}",           // keycap 1 (digit + VS16 + combining enclosing keycap)
-            "#\u{FE0F}\u{20E3}",           // keycap # (hash + VS16 + combining enclosing keycap)
-            "©\u{FE0F}",                    // copyright + VS16
-            "🏛\u{FE0F} building",         // classical building (supplemental) + VS16
+            "✅\u{FE0F} VERIFIED", // check mark + VS16
+            "⚠\u{FE0F} WARNING",   // warning sign + VS16
+            "❌\u{FE0F} FAILED",   // cross mark + VS16
+            "☁\u{FE0F} cloud",     // cloud + VS16
+            "1\u{FE0F}\u{20E3}",   // keycap 1 (digit + VS16 + combining enclosing keycap)
+            "#\u{FE0F}\u{20E3}",   // keycap # (hash + VS16 + combining enclosing keycap)
+            "©\u{FE0F}",           // copyright + VS16
+            "🏛\u{FE0F} building",  // classical building (supplemental) + VS16
         ] {
             let issues = rule.check(input);
             assert!(
@@ -499,9 +511,11 @@ mod tests {
         let issues = rule.check(content);
 
         assert!(!issues.is_empty());
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("VARIATION SELECTOR")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("VARIATION SELECTOR"))
+        );
     }
 
     #[test]
@@ -510,12 +524,16 @@ mod tests {
         let content = "text\u{202E}reversed\u{202C}normal";
         let issues = rule.check(content);
 
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("RIGHT-TO-LEFT OVERRIDE")));
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("POP DIRECTIONAL FORMATTING")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("RIGHT-TO-LEFT OVERRIDE"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("POP DIRECTIONAL FORMATTING"))
+        );
     }
 
     #[test]
@@ -572,9 +590,11 @@ mod tests {
         let content = "te\u{034F}xt";
         let issues = rule.check(content);
 
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("COMBINING GRAPHEME JOINER")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("COMBINING GRAPHEME JOINER"))
+        );
     }
 
     #[test]
@@ -583,11 +603,15 @@ mod tests {
         let content = "a\u{2066}b\u{2069}c";
         let issues = rule.check(content);
 
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("LEFT-TO-RIGHT ISOLATE")));
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("POP DIRECTIONAL ISOLATE")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("LEFT-TO-RIGHT ISOLATE"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("POP DIRECTIONAL ISOLATE"))
+        );
     }
 }

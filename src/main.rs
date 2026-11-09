@@ -11,12 +11,20 @@ use serde_sarif::sarif;
 use walkdir::WalkDir;
 
 mod rules;
-use rules::{Issue, SuspicionLevel, Rule, invisible_chars, non_printable, html_comments, excessive_whitespace, suspicious_keywords, unicode_homoglyphs, mixed_scripts, url_encoding, excessive_backticks, base64_encoded, high_entropy, frontmatter_hooks, inline_commands, bundled_scripts, excessive_length, Severity, compute_suspicion_level};
+use rules::{
+    Issue, Rule, Severity, SuspicionLevel, base64_encoded, bundled_scripts,
+    compute_suspicion_level, excessive_backticks, excessive_length, excessive_whitespace,
+    frontmatter_hooks, high_entropy, html_comments, inline_commands, invisible_chars,
+    mixed_scripts, non_printable, suspicious_keywords, unicode_homoglyphs, url_encoding,
+};
 
 #[derive(Parser)]
 #[command(name = "skill-issues")]
 #[command(about = "Linter for skill markdown files - prevents prompt injection")]
-#[expect(clippy::struct_excessive_bools, reason = "CLI flags are naturally boolean")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI flags are naturally boolean"
+)]
 struct Cli {
     /// Path to scan (file or directory)
     #[arg(default_value = ".")]
@@ -195,10 +203,7 @@ fn find_non_markdown_siblings(scan_root: &Path, markdown_paths: &[PathBuf]) -> V
     let mut results: Vec<FileResult> = Vec::new();
 
     // Collect all directories that contain at least one markdown file
-    let markdown_dirs: HashSet<&Path> = markdown_paths
-        .iter()
-        .filter_map(|p| p.parent())
-        .collect();
+    let markdown_dirs: HashSet<&Path> = markdown_paths.iter().filter_map(|p| p.parent()).collect();
 
     // Walk all files under scan_root, excluding ignored dirs
     let mut non_md_by_parent: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
@@ -228,10 +233,7 @@ fn find_non_markdown_siblings(scan_root: &Path, markdown_paths: &[PathBuf]) -> V
         .collect();
 
     for (parent, file) in non_md_files {
-        non_md_by_parent
-            .entry(parent)
-            .or_default()
-            .push(file);
+        non_md_by_parent.entry(parent).or_default().push(file);
     }
 
     // Build FileResult entries grouped by immediate parent directory
@@ -321,12 +323,18 @@ fn generate_sarif(file_results: &[FileResult]) -> sarif::Sarif {
 
     for file_result in file_results {
         for issue in &file_result.issues {
-            #[expect(clippy::cast_possible_wrap, reason = "Line numbers won't exceed i64::MAX")]
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "Line numbers won't exceed i64::MAX"
+            )]
             let line = issue.line as i64;
             let region = issue.column.map_or_else(
                 || sarif::Region::builder().start_line(line).build(),
                 |col| {
-                    #[expect(clippy::cast_possible_wrap, reason = "Column numbers won't exceed i64::MAX")]
+                    #[expect(
+                        clippy::cast_possible_wrap,
+                        reason = "Column numbers won't exceed i64::MAX"
+                    )]
                     let col = col as i64;
                     sarif::Region::builder()
                         .start_line(line)
@@ -513,10 +521,13 @@ fn main() -> Result<()> {
 
     // Aggregate error/warning counts from parallel results
     let (total_errors, total_warnings) = file_results.iter().fold((0, 0), |(errs, warns), fr| {
-        let (e, w) = fr.issues.iter().fold((0, 0), |(e, w), issue| match issue.severity {
-            Severity::Error => (e + 1, w),
-            Severity::Warning => (e, w + 1),
-        });
+        let (e, w) = fr
+            .issues
+            .iter()
+            .fold((0, 0), |(e, w), issue| match issue.severity {
+                Severity::Error => (e + 1, w),
+                Severity::Warning => (e, w + 1),
+            });
         (errs + e, warns + w)
     });
 
