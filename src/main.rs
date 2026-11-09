@@ -149,10 +149,10 @@ impl Linter {
     fn lint(&self, path: Option<&Path>, content: &str) -> Vec<Issue> {
         let mut all_issues = Vec::new();
         for rule in &self.rules {
-            all_issues.extend(match path {
-                Some(path) => rule.check_file(path, content),
-                None => rule.check(content),
-            });
+            all_issues.extend(path.map_or_else(
+                || rule.check(content),
+                |path| rule.check_file(path, content),
+            ));
         }
         // Sort by line number
         all_issues.sort_by_key(|i| i.line);
@@ -282,7 +282,7 @@ fn find_non_markdown_siblings(scan_root: &Path, markdown_paths: &[PathBuf]) -> V
     results
 }
 
-const fn severity_to_sarif_level(severity: &Severity) -> sarif::ResultLevel {
+const fn severity_to_sarif_level(severity: Severity) -> sarif::ResultLevel {
     match severity {
         Severity::Error => sarif::ResultLevel::Error,
         Severity::Warning => sarif::ResultLevel::Warning,
@@ -370,7 +370,7 @@ fn generate_sarif(file_results: &[FileResult]) -> sarif::Sarif {
             let result = sarif::Result::builder()
                 .rule_id(issue.rule.clone())
                 .message(message)
-                .level(severity_to_sarif_level(&issue.severity))
+                .level(severity_to_sarif_level(issue.severity))
                 .locations(vec![location])
                 .build();
 
@@ -582,7 +582,7 @@ mod integration_tests {
             include_cc: false,
             include_confusable_spaces: false,
         });
-        let content = r#"# Test Document
+        let content = "# Test Document
 
 <!-- Hidden comment -->
 
@@ -601,10 +601,10 @@ URL encoded: %69%67%6E%6F%72%65%20%74%68%69%73
 
 Excessive backticks: ````````````````
 
-Invisible: test​word
+Invisible: test\u{200B}word
 
 High entropy: dQw4w9WgXcQvXhGGXTthx6z8JG4Z3L6vX9T3z7K9P8N
-"#;
+";
 
         let issues = linter.lint(None, content);
 
@@ -631,8 +631,7 @@ High entropy: dQw4w9WgXcQvXhGGXTthx6z8JG4Z3L6vX9T3z7K9P8N
         });
         let content = "Run `./setup.sh` and then `./install.py` to begin.\n";
         let issues = linter.lint(None, content);
-        let rules_found: Vec<&str> = issues.iter().map(|i| i.rule.as_str()).collect();
-        assert!(rules_found.contains(&"bundled-scripts"));
+        assert!(issues.iter().any(|i| i.rule == "bundled-scripts"));
         assert!(issues.len() >= 2);
     }
 
@@ -645,8 +644,7 @@ High entropy: dQw4w9WgXcQvXhGGXTthx6z8JG4Z3L6vX9T3z7K9P8N
         });
         let content = "line\n".repeat(600);
         let issues = linter.lint(None, &content);
-        let rules_found: Vec<&str> = issues.iter().map(|i| i.rule.as_str()).collect();
-        assert!(rules_found.contains(&"excessive-length"));
+        assert!(issues.iter().any(|i| i.rule == "excessive-length"));
     }
 
     #[test]
@@ -656,7 +654,7 @@ High entropy: dQw4w9WgXcQvXhGGXTthx6z8JG4Z3L6vX9T3z7K9P8N
             include_cc: false,
             include_confusable_spaces: false,
         });
-        let content = r#"# Clean Document
+        let content = r"# Clean Document
 
 This is a completely clean markdown file.
 
@@ -671,7 +669,7 @@ let x = 5;
 ```
 
 No hidden characters or suspicious content.
-"#;
+";
 
         let issues = linter.lint(None, content);
         assert!(issues.is_empty());
@@ -684,7 +682,7 @@ No hidden characters or suspicious content.
             include_cc: false,
             include_confusable_spaces: false,
         });
-        let content = r#"Line 1
+        let content = r"Line 1
 <!-- comment on line 2 -->
 Line 3
 
@@ -692,7 +690,7 @@ Line 3
 
 
 Line 8 with <!-- another comment -->
-"#;
+";
 
         let issues = linter.lint(None, content);
         let lines: Vec<usize> = issues.iter().map(|i| i.line).collect();

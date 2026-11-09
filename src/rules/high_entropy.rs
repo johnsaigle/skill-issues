@@ -24,7 +24,7 @@ fn calculate_entropy(s: &str) -> f64 {
     let mut entropy = 0.0;
     for count in char_counts.values() {
         let probability = *count as f64 / total_chars as f64;
-        entropy -= probability * probability.log2();
+        entropy = probability.mul_add(-probability.log2(), entropy);
     }
 
     entropy
