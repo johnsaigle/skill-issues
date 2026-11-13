@@ -54,6 +54,9 @@ skill-issues --strict
 # Set max consecutive empty lines (default: 3)
 skill-issues --max-empty-lines 5
 
+# Don't flag non-markdown files found alongside skill documents
+skill-issues --no-sibling-check
+
 # Output formats
 skill-issues --format text    # Human-readable (default)
 skill-issues --format json    # JSON output
@@ -68,7 +71,8 @@ skill-issues --format sarif   # SARIF output for GitHub Advanced Security
 |------|-------------|
 | `html-comments` | HTML comments (`<!-- ... -->`) can hide instructions |
 | `non-printable-chars` | Control characters and zero-width characters |
-| `suspicious-keywords` | Phrases like "ignore previous instructions", "jailbreak", "system prompt" |
+| `suspicious-keywords` | Phrases like "ignore previous instructions", "jailbreak", "system prompt"; concealment directives ("do not mention", "without telling the user"); permission-bypass flags (`--dangerously-skip-permissions`, `--yolo`, `bypassPermissions`) |
+| `frontmatter-validation` | `SKILL.md` frontmatter missing `name`/`description`, or with angle brackets in either (other findings from this rule are warnings) |
 | `unicode-homoglyphs` | Cyrillic characters that look like ASCII (e.g., Cyrillic 'а' vs Latin 'a') |
 | `invisible-characters` | Zero-width spaces, joiners, soft hyphens used for steganography |
 
@@ -82,6 +86,10 @@ skill-issues --format sarif   # SARIF output for GitHub Advanced Security
 | `excessive-backticks` | Unusual number of backticks (may break code block parsing) |
 | `base64-encoded` | Base64 content that decodes to suspicious text |
 | `high-entropy` | High-entropy strings indicating encoded/obfuscated content |
+| `frontmatter-validation` | `SKILL.md` name not kebab-case or not matching its directory; empty, very short or over-long description; `allowed-tools: *` or list-form `allowed-tools`; mixed OpenCode and Claude Code fields; `agents/openai.yaml` `short_description` outside 25-64 chars |
+| `bundled-scripts` | References to local scripts or executables (`./run.sh`, `scripts/setup.py`) |
+| `excessive-length` | File over 500 lines or over 50 KiB |
+| `non-markdown-siblings` | Non-markdown files alongside skill documents (disable with `--no-sibling-check`) |
 
 ## Example Output
 
