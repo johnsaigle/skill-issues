@@ -387,88 +387,182 @@ fn generate_sarif(file_results: &[FileResult]) -> sarif::Sarif {
         .build()
 }
 
+/// Longest source snippet shown under a finding, in characters.
+const MAX_SNIPPET_CHARS: usize = 120;
+
+/// Rules whose findings describe the whole file, so no source line is shown.
+const WHOLE_FILE_RULES: &[&str] = &["excessive-length", "non-markdown-siblings"];
+
+/// Makes a source line safe and legible to print under a finding.
+///
+/// Control and invisible characters are shown as `\u{..}` escapes: printing
+/// them raw would hide exactly what the finding is about, and would let a
+/// scanned file send escape sequences to the terminal.
+fn sanitize_snippet(line: &str) -> String {
+    let mut out = String::new();
+    for (count, ch) in line.trim().chars().enumerate() {
+        if count == MAX_SNIPPET_CHARS {
+            out.push('…');
+            break;
+        }
+        if ch == '\t' {
+            out.push(' ');
+        } else if ch.is_control() || rules::is_invisible_codepoint(ch) {
+            out.extend(ch.escape_unicode());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+const fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn print_file_result(file_result: &FileResult, issues: &[&Issue]) {
+    let has_errors = issues.iter().any(|i| i.severity == Severity::Error);
+    let heading = if issues.is_empty() {
+        format!("✓ {}", file_result.path).green()
+    } else if has_errors {
+        format!("✗ {}", file_result.path).red()
+    } else {
+        format!("! {}", file_result.path).yellow()
+    };
+    let suspicion_badge = match &file_result.suspicion_level {
+        Some(SuspicionLevel::Critical) => format!(" {}", "[CRITICAL]".red().bold()),
+        Some(SuspicionLevel::High) => format!(" {}", "[HIGH]".red()),
+        Some(SuspicionLevel::Medium) => format!(" {}", "[MEDIUM]".yellow()),
+        Some(SuspicionLevel::Info) | None => String::new(),
+    };
+    println!("{heading}{suspicion_badge}");
+
+    if let (Some(total), Some(run)) = (
+        file_result.total_invisible_codepoints,
+        file_result.longest_consecutive_run,
+    ) {
+        println!(
+            "  {}",
+            format!("{total} invisible codepoints, longest consecutive run: {run}").dimmed()
+        );
+    }
+
+    // Read lazily: only files with findings to show need their source lines.
+    let source = if issues.iter().any(|i| i.line > 0) {
+        fs::read_to_string(&file_result.path).ok()
+    } else {
+        None
+    };
+    let source_lines: Vec<&str> = source.as_deref().map_or_default(|s| s.lines().collect());
+
+    for issue in issues {
+        let label = match issue.severity {
+            Severity::Error => "Error",
+            Severity::Warning => "Warning",
+        };
+        let location = match (issue.line, issue.column) {
+            (0, _) => format!("{label}:"),
+            (line, None) => format!("{label} line {line}:"),
+            (line, Some(col)) => format!("{label} line {line}:{col}:"),
+        };
+        let location = match issue.severity {
+            Severity::Error => location.red(),
+            Severity::Warning => location.yellow(),
+        };
+        println!(
+            "  {location} {} {}",
+            issue.message,
+            format!("[{}]", issue.rule).dimmed()
+        );
+
+        if WHOLE_FILE_RULES.contains(&issue.rule.as_str()) {
+            continue;
+        }
+        let snippet = issue
+            .line
+            .checked_sub(1)
+            .and_then(|idx| source_lines.get(idx))
+            .map_or_default(|line| sanitize_snippet(line));
+        if !snippet.is_empty() {
+            println!("  {} {snippet}", ">".blue());
+        }
+    }
+    println!();
+}
+
 fn output_text(file_results: &[FileResult], summary: &Summary, quiet: bool, verbose: bool) {
-    let files_with_issues: Vec<&FileResult> = file_results
-        .iter()
-        .filter(|f| !f.issues.is_empty())
-        .collect();
+    println!(
+        "{}",
+        "Checking skill files for prompt injection...\n".blue()
+    );
 
-    if !files_with_issues.is_empty() {
-        println!(); // Blank line before first file
-        for file_result in &files_with_issues {
-            let suspicion_badge = match &file_result.suspicion_level {
-                Some(SuspicionLevel::Critical) => format!(" {}", "[CRITICAL]".red().bold()),
-                Some(SuspicionLevel::High) => format!(" {}", "[HIGH]".red()),
-                Some(SuspicionLevel::Medium) => format!(" {}", "[MEDIUM]".yellow()),
-                Some(SuspicionLevel::Info) | None => String::new(),
-            };
-
-            println!("{}{}", file_result.path.bold().underline(), suspicion_badge);
-
-            // Show invisible char summary if present
-            if let (Some(total), Some(run)) = (
-                file_result.total_invisible_codepoints,
-                file_result.longest_consecutive_run,
-            ) {
-                println!("  {total} invisible codepoints, longest consecutive run: {run}");
-            }
-
-            for issue in &file_result.issues {
-                let severity_str = match issue.severity {
-                    Severity::Error => "ERROR".red().bold(),
-                    Severity::Warning => "WARN".yellow().bold(),
-                };
-
-                if issue.severity == Severity::Error || !quiet {
-                    let col_str = issue.column.map_or_default(|c| format!(":{c}"));
-                    println!(
-                        "  [{}] {}:{}{} - {}",
-                        severity_str,
-                        issue.line,
-                        col_str,
-                        format!(" [{}]", issue.rule).dimmed(),
-                        issue.message
-                    );
-                }
-            }
+    for file_result in file_results {
+        let issues: Vec<&Issue> = file_result
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error || !quiet)
+            .collect();
+        if !issues.is_empty() || verbose {
+            print_file_result(file_result, &issues);
         }
     }
 
-    // Summary line
-    if verbose || files_with_issues.is_empty() {
-        println!("{} files scanned", summary.files_scanned);
-    }
+    println!("{}", "═══════════════════════════════════════".blue());
 
-    if !files_with_issues.is_empty() {
-        // Suspicion level breakdown
-        let critical_count = file_results
+    let count_level = |level: SuspicionLevel| {
+        file_results
             .iter()
-            .filter(|f| f.suspicion_level == Some(SuspicionLevel::Critical))
-            .count();
-        let high_count = file_results
-            .iter()
-            .filter(|f| f.suspicion_level == Some(SuspicionLevel::High))
-            .count();
+            .filter(|f| f.suspicion_level.as_ref() == Some(&level))
+            .count()
+    };
+    let critical_count = count_level(SuspicionLevel::Critical);
+    let high_count = count_level(SuspicionLevel::High);
 
-        if critical_count > 0 {
+    if summary.total_errors == 0 {
+        println!("{}", "✓ No errors found!".green());
+        if summary.total_warnings > 0 && !quiet {
             println!(
-                "{} {}",
-                critical_count,
-                "files with CRITICAL suspicion level".red().bold()
+                "{}",
+                format!("Warnings: {}", summary.total_warnings).yellow()
             );
         }
-        if high_count > 0 {
-            println!("{} {}", high_count, "files with HIGH suspicion level".red());
-        }
-
         println!(
-            "{} {} found",
-            summary.total_errors,
-            if summary.total_errors == 1 {
-                "error"
-            } else {
-                "errors"
-            }
+            "{}",
+            format!("Files checked: {}", summary.files_scanned).blue()
+        );
+    } else {
+        println!(
+            "{}",
+            format!(
+                "✗ Found {} error{} and {} warning{} in {} file{}",
+                summary.total_errors,
+                plural(summary.total_errors),
+                summary.total_warnings,
+                plural(summary.total_warnings),
+                summary.files_scanned,
+                plural(summary.files_scanned)
+            )
+            .red()
+        );
+    }
+    if critical_count > 0 {
+        println!(
+            "{}",
+            format!(
+                "{critical_count} file{} with CRITICAL suspicion level",
+                plural(critical_count)
+            )
+            .red()
+            .bold()
+        );
+    }
+    if high_count > 0 {
+        println!(
+            "{}",
+            format!(
+                "{high_count} file{} with HIGH suspicion level",
+                plural(high_count)
+            )
             .red()
         );
     }
@@ -699,5 +793,20 @@ Line 8 with <!-- another comment -->
         for i in 1..lines.len() {
             assert!(lines[i] >= lines[i - 1]);
         }
+    }
+
+    #[test]
+    fn snippet_escapes_invisible_and_control_chars() {
+        assert_eq!(
+            sanitize_snippet("  a\u{200B}b\u{1b}[31m\tc  "),
+            "a\\u{200b}b\\u{1b}[31m c"
+        );
+    }
+
+    #[test]
+    fn snippet_is_truncated() {
+        let snippet = sanitize_snippet(&"x".repeat(500));
+        assert_eq!(snippet.chars().count(), MAX_SNIPPET_CHARS + 1);
+        assert!(snippet.ends_with('…'));
     }
 }
