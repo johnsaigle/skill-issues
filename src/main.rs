@@ -420,7 +420,7 @@ fn output_text(file_results: &[FileResult], summary: &Summary, quiet: bool, verb
                 };
 
                 if issue.severity == Severity::Error || !quiet {
-                    let col_str = issue.column.map(|c| format!(":{c}")).unwrap_or_default();
+                    let col_str = issue.column.map_or_default(|c| format!(":{c}"));
                     println!(
                         "  [{}] {}:{}{} - {}",
                         severity_str,

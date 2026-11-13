@@ -24,6 +24,11 @@ use super::{Issue, Rule, Severity};
 /// dropped: on real skills it fired on nearly every file, because a good
 /// trigger description naturally reuses the body's vocabulary.
 ///
+/// Codex reads UI metadata from a sibling `agents/openai.yaml`; when that
+/// file exists, its `short_description` must be 25-64 characters. A missing
+/// `agents/openai.yaml` is not flagged: the file is optional, and no
+/// frontmatter key reliably marks a skill as Codex-only.
+///
 /// Only files named `SKILL.md` are checked when a path is known, so ordinary
 /// markdown with frontmatter (docs, blog posts) is not flagged.
 pub struct FrontmatterValidationRule;
@@ -32,6 +37,9 @@ const RULE_NAME: &str = "frontmatter-validation";
 const MAX_NAME_LEN: usize = 64;
 const MIN_DESCRIPTION_LEN: usize = 20;
 const MAX_DESCRIPTION_LEN: usize = 1024;
+const SHORT_DESCRIPTION_LEN: std::ops::RangeInclusive<usize> = 25..=64;
+/// `agents/openai.yaml` is a few lines of metadata; never read more than this.
+const MAX_OPENAI_YAML_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug)]
 struct Field {
@@ -157,6 +165,41 @@ fn issue(line_idx: usize, severity: Severity, message: String) -> Issue {
         message,
         rule: RULE_NAME.to_string(),
     }
+}
+
+/// Extracts `short_description` from the text of an `agents/openai.yaml`.
+///
+/// The key normally sits under `interface:`, so it is matched at any
+/// indentation rather than by parsing the YAML structure.
+fn openai_short_description(yaml: &str) -> Option<&str> {
+    yaml.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "short_description").then(|| unquote(value))
+    })
+}
+
+fn check_openai_yaml(skill_dir: &Path) -> Option<Issue> {
+    use std::io::Read;
+
+    let path = skill_dir.join("agents").join("openai.yaml");
+    let mut yaml = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_OPENAI_YAML_BYTES)
+        .read_to_string(&mut yaml)
+        .ok()?;
+    let len = openai_short_description(&yaml)?.chars().count();
+    (!SHORT_DESCRIPTION_LEN.contains(&len)).then(|| {
+        issue(
+            0,
+            Severity::Warning,
+            format!(
+                "agents/openai.yaml 'short_description' is {len} chars; Codex expects {}-{}",
+                SHORT_DESCRIPTION_LEN.start(),
+                SHORT_DESCRIPTION_LEN.end()
+            ),
+        )
+    })
 }
 
 impl FrontmatterValidationRule {
@@ -312,9 +355,7 @@ impl Rule for FrontmatterValidationRule {
 
     /// Without a path, the content is assumed to be a `SKILL.md`.
     fn check(&self, content: &str) -> Vec<Issue> {
-        parse_frontmatter(content)
-            .map(|fm| Self::validate(&fm, None))
-            .unwrap_or_default()
+        parse_frontmatter(content).map_or_default(|fm| Self::validate(&fm, None))
     }
 
     fn check_file(&self, path: &Path, content: &str) -> Vec<Issue> {
@@ -329,9 +370,10 @@ impl Rule for FrontmatterValidationRule {
             .parent()
             .and_then(Path::file_name)
             .and_then(|n| n.to_str());
-        parse_frontmatter(content)
-            .map(|fm| Self::validate(&fm, dir_name))
-            .unwrap_or_default()
+        let mut issues =
+            parse_frontmatter(content).map_or_default(|fm| Self::validate(&fm, dir_name));
+        issues.extend(path.parent().and_then(check_openai_yaml));
+        issues
     }
 }
 
@@ -506,5 +548,43 @@ mod tests {
             Severity::Warning,
             "kebab-case"
         ));
+    }
+
+    #[test]
+    fn openai_short_description_is_extracted() {
+        let yaml = "interface:\n  display_name: \"PDF\"\n  short_description: \"Extract tables\"\n";
+        assert_eq!(openai_short_description(yaml), Some("Extract tables"));
+        assert_eq!(
+            openai_short_description("interface:\n  display_name: x\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn openai_yaml_short_description_length_is_checked() {
+        let dir = std::env::temp_dir().join(format!("skill-issues-openai-{}", std::process::id()));
+        let skill = dir.join("pdf-tools");
+        std::fs::create_dir_all(skill.join("agents")).unwrap();
+        let content =
+            "---\nname: pdf-tools\ndescription: Extracts tables from PDF documents\n---\n";
+        let yaml = skill.join("agents/openai.yaml");
+        let rule = FrontmatterValidationRule;
+
+        std::fs::write(&yaml, "interface:\n  short_description: \"Too short\"\n").unwrap();
+        let issues = rule.check_file(&skill.join("SKILL.md"), content);
+        assert!(has(
+            &issues,
+            Severity::Warning,
+            "'short_description' is 9 chars"
+        ));
+
+        std::fs::write(
+            &yaml,
+            "interface:\n  short_description: \"Extract tables from PDF documents\"\n",
+        )
+        .unwrap();
+        assert!(rule.check_file(&skill.join("SKILL.md"), content).is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
