@@ -122,7 +122,7 @@ const fn is_emoji_variation_selector(ch: char) -> bool {
 
 /// Returns true if the character is one of the invisible/smuggling codepoints
 /// that we track for suspicion scoring.
-fn is_invisible_codepoint(ch: char) -> bool {
+pub fn is_invisible_codepoint(ch: char) -> bool {
     let cp = ch as u32;
     matches!(ch,
         // Zero-width and joiners
