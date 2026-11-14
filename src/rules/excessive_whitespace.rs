@@ -23,16 +23,16 @@ impl Rule for ExcessiveWhitespaceRule {
                 empty_count += 1;
             } else {
                 if empty_count > self.max_empty_lines {
-                    issues.push(Issue {
-                        severity: Severity::Warning,
-                        line: empty_start,
-                        column: None,
-                        message: format!(
+                    issues.push(Issue::new(
+                        self.name(),
+                        Severity::Warning,
+                        empty_start,
+                        None,
+                        format!(
                             "{} consecutive empty lines (max: {})",
                             empty_count, self.max_empty_lines
                         ),
-                        rule: self.name().to_string(),
-                    });
+                    ));
                 }
                 empty_count = 0;
             }

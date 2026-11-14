@@ -1,6 +1,118 @@
+use std::path::Path;
+use std::sync::LazyLock;
+
 use regex::Regex;
 
-use super::{Issue, Rule, Severity};
+use super::{Issue, Rule, Severity, line_col, quote_excerpt};
+
+/// The inline form, matched over the whole file like Claude Code does: an
+/// exclamation mark at the start of the file or after any whitespace
+/// (including a line break, tab or Unicode space), then a backtick-delimited
+/// command that may itself span lines. With anything else before the
+/// exclamation mark (as in `KEY=!` followed by a command) it does not run
+/// and is not matched.
+static INLINE_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|\s)(!\x60([^\x60]+)\x60)").expect("invalid inline-commands regex")
+});
+
+/// The block form: ` ```! ` anywhere (indented, mid-line, or as the tail of
+/// a longer fence) up to the next ` ``` `, which may also be mid-line. Text
+/// after ` ```! ` on its own line is part of the command. An unclosed block
+/// does not run.
+static COMMAND_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)(\x60\x60\x60!(.*?)\x60\x60\x60)").expect("invalid inline-commands regex")
+});
+
+/// Longest command text quoted in a finding, in characters.
+const MAX_QUOTED_CHARS: usize = 120;
+
+/// Programs that reach the network.
+const NETWORK: &[&str] = &[
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "telnet",
+    "ssh",
+    "scp",
+    "sftp",
+    "ftp",
+    "rsync",
+    // PowerShell (frontmatter `shell: powershell`)
+    "iwr",
+    "irm",
+    "invoke-webrequest",
+    "invoke-restmethod",
+    "start-bitstransfer",
+];
+
+/// Programs that run their arguments as a new command.
+const SHELLS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "eval",
+    "exec",
+    "source",
+    "xargs",
+    "sudo",
+    "pwsh",
+    "powershell",
+    "osascript",
+    "cmd",
+    // PowerShell
+    "iex",
+    "invoke-expression",
+    "invoke-command",
+    "start-process",
+];
+
+/// Interpreters that run inline code when given the paired flag.
+const INLINE_CODE: &[(&str, &str)] = &[
+    ("python", "-c"),
+    ("python3", "-c"),
+    ("perl", "-e"),
+    ("ruby", "-e"),
+    ("node", "-e"),
+    ("node", "--eval"),
+    ("php", "-r"),
+];
+
+/// Programs that delete or overwrite data.
+const DESTRUCTIVE: &[&str] = &[
+    "rm",
+    "dd",
+    "shred",
+    "mkfs",
+    "truncate",
+    "tee",
+    // PowerShell
+    "remove-item",
+    "del",
+    "set-content",
+    "add-content",
+    "out-file",
+];
+
+/// Path components that hold credentials or secrets.
+const SECRET_PATHS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".netrc",
+    ".env",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+];
 
 /// Detects inline shell command execution patterns in skill markdown files.
 ///
@@ -15,10 +127,15 @@ use super::{Issue, Rule, Severity};
 ///
 /// Reference: <https://x.com/lydiahallie/status/2034337963820327017>
 ///
+/// Both the inline form and the ` ```! ` block form are detected, matched
+/// the way Claude Code (v2.1.323) matches them. Code fences, code spans and
+/// HTML comments do not stop a command from running, so nothing is skipped.
+///
 /// Severity mapping:
-/// - Any bang-backtick occurrence → **Warning** (shell execution on skill load)
-/// - Command contains pipe, `curl`, `wget`, `eval`, `exec`, `sh`,
-///   `bash`, or writes to disk → **Error** (high-risk command)
+/// - Any command → **Warning** (shell execution on skill load)
+/// - Command pipes, chains or substitutes commands, writes a file, reaches
+///   the network, starts a shell or interpreter, deletes data, decodes
+///   base64 or touches credential files → **Error** (see [`high_risk_reason`])
 pub struct InlineCommandsRule;
 
 impl Rule for InlineCommandsRule {
@@ -27,123 +144,159 @@ impl Rule for InlineCommandsRule {
     }
 
     fn check(&self, content: &str) -> Vec<Issue> {
-        let mut issues = Vec::new();
+        let inline = INLINE_COMMAND
+            .captures_iter(content)
+            .map(|cap| (cap.get(1), cap.get(2), "Inline command"));
+        let blocks = COMMAND_BLOCK
+            .captures_iter(content)
+            .map(|cap| (cap.get(1), cap.get(2), "Command block"));
 
-        // Match the !`...` pattern. The backtick after ! starts the command,
-        // and the next backtick ends it. We use a non-greedy match.
-        // Pattern: !` followed by any non-backtick chars, followed by `
-        let re = Regex::new(r"!\x60([^\x60]+)\x60").expect("invalid inline-commands regex");
-
-        for (line_idx, line) in content.lines().enumerate() {
-            // Skip lines inside fenced code blocks — these are documentation,
-            // not live commands. We do a simple tracking of ``` fences.
-            // (Handled at the outer loop level below.)
-
-            for cap in re.captures_iter(line) {
-                let full_match = cap.get(0).unwrap();
-                let command = cap.get(1).unwrap().as_str();
-                let col = full_match.start() + 1; // 1-based column
-
-                let severity = if is_high_risk_command(command) {
-                    Severity::Error
-                } else {
-                    Severity::Warning
-                };
-
-                let message = if severity == Severity::Error {
-                    format!(
-                        "Inline command `!`{command}`` executes at skill load time — \
-                         contains high-risk pattern (RCE vector)"
-                    )
-                } else {
-                    format!(
-                        "Inline command `!`{command}`` executes shell command at skill \
-                         load time with user's privileges"
-                    )
-                };
-
-                issues.push(Issue {
+        let mut issues: Vec<Issue> = inline
+            .chain(blocks)
+            .filter_map(|(whole, command, kind)| {
+                let (whole, command) = (whole?, command?.as_str());
+                let (line, column) = line_col(content, whole.start());
+                let quoted = quote_excerpt(whole.as_str(), MAX_QUOTED_CHARS);
+                let (severity, message) = high_risk_reason(command).map_or_else(
+                    || {
+                        (
+                            Severity::Warning,
+                            format!(
+                                "{kind} {quoted} executes shell command at skill load time \
+                                 with user's privileges"
+                            ),
+                        )
+                    },
+                    |reason| {
+                        (
+                            Severity::Error,
+                            format!(
+                                "{kind} {quoted} executes at skill load time — \
+                                 high-risk: {reason} (RCE vector)"
+                            ),
+                        )
+                    },
+                );
+                Some(Issue::new(
+                    self.name(),
                     severity,
-                    line: line_idx + 1,
-                    column: Some(col),
+                    line,
+                    Some(column),
                     message,
-                    rule: self.name().to_string(),
-                });
+                ))
+            })
+            .collect();
+
+        issues.sort_by_key(|issue| (issue.line, issue.column));
+        issues
+    }
+
+    /// Claude Code only substitutes commands in skill documents and command
+    /// files. Elsewhere (a skill's `references/` or `examples/`, a README)
+    /// the text is read as documentation, so findings there are capped at
+    /// warnings.
+    fn check_file(&self, path: &Path, content: &str) -> Vec<Issue> {
+        let mut issues = self.check(content);
+        if !runs_substitution(path) {
+            for issue in &mut issues {
+                issue.severity = Severity::Warning;
+                issue.message.push_str(
+                    " — only runs if this file is loaded as a skill (SKILL.md) or command",
+                );
             }
         }
-
-        // Second pass: filter out issues that fall inside fenced code blocks.
-        // This avoids false positives when skills document the pattern.
-        let code_block_lines = compute_fenced_code_block_lines(content);
-        issues.retain(|issue| !code_block_lines.contains(&issue.line));
-
         issues
     }
 }
 
-/// Returns true if the command string contains patterns associated with
-/// high-risk operations (network access, shell piping, eval, disk writes).
-fn is_high_risk_command(command: &str) -> bool {
-    let lower = command.to_lowercase();
-
-    // Pipe to another command — classic RCE chain
-    if command.contains('|') {
-        return true;
-    }
-
-    // Network access
-    if lower.contains("curl")
-        || lower.contains("wget")
-        || lower.contains("nc ")
-        || lower.contains("netcat")
-    {
-        return true;
-    }
-
-    // Shell interpreters / eval
-    if lower.contains("eval ")
-        || lower.contains("exec ")
-        || lower.contains(" sh ")
-        || lower.contains(" bash ")
-        || lower.ends_with(" sh")
-        || lower.ends_with(" bash")
-        || lower.starts_with("sh ")
-        || lower.starts_with("bash ")
-    {
-        return true;
-    }
-
-    // Disk writes / destructive ops
-    if lower.contains(" > ") || lower.contains(" >> ") || lower.contains("rm ") {
-        return true;
-    }
-
-    false
+/// Whether Claude Code runs command substitution in this file: a `SKILL.md`,
+/// or a markdown file under a `commands` directory.
+fn runs_substitution(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("SKILL.md"))
+        || path.parent().is_some_and(|dir| {
+            dir.ancestors()
+                .any(|d| d.file_name().is_some_and(|n| n == "commands"))
+        })
 }
 
-/// Computes the set of 1-based line numbers that fall inside fenced code blocks.
-fn compute_fenced_code_block_lines(content: &str) -> std::collections::HashSet<usize> {
-    let mut in_code_block = false;
-    let mut code_lines = std::collections::HashSet::new();
+/// Returns why a command is high-risk, or `None` if it is not.
+///
+/// Program names are matched as whole words (`rsync` is not `nc`), by the
+/// last path component (`/usr/bin/curl` is `curl`).
+pub(super) fn high_risk_reason(command: &str) -> Option<&'static str> {
+    if command.contains(';')
+        || command.contains("&&")
+        || command.contains("||")
+        || command.contains("$(")
+    {
+        return Some("chains or substitutes commands");
+    }
+    if command.contains('|') {
+        return Some("pipes output into another command");
+    }
+    if writes_file(command) {
+        return Some("redirects output to a file");
+    }
 
-    for (idx, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            if in_code_block {
-                // Closing fence — this line is still inside the block
-                code_lines.insert(idx + 1);
-                in_code_block = false;
-            } else {
-                // Opening fence
-                in_code_block = true;
-                code_lines.insert(idx + 1);
-            }
-        } else if in_code_block {
-            code_lines.insert(idx + 1);
+    let lower = command.to_lowercase();
+    if lower.contains("/etc/passwd") || lower.contains("/etc/shadow") {
+        return Some("reads system account files");
+    }
+
+    let words: Vec<&str> = lower
+        .split(|c: char| c.is_whitespace() || "<>&()'\"=".contains(c))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let program = |w: &str| {
+        let name = w.rsplit(['/', '\\']).next().unwrap_or(w);
+        name.strip_suffix(".exe").unwrap_or(name).to_owned()
+    };
+
+    for (i, word) in words.iter().enumerate() {
+        let name = program(word);
+        let next = words.get(i + 1).copied().unwrap_or("");
+        if NETWORK.contains(&name.as_str()) {
+            return Some("accesses the network");
+        }
+        if SHELLS.contains(&name.as_str()) {
+            return Some("runs a shell or evaluates a command");
+        }
+        if INLINE_CODE.contains(&(name.as_str(), next)) {
+            return Some("runs inline interpreter code");
+        }
+        if DESTRUCTIVE.contains(&name.as_str()) {
+            return Some("deletes or overwrites data");
+        }
+        if matches!(name.as_str(), "env" | "printenv") {
+            return Some("dumps environment variables (may contain secrets)");
+        }
+        if name == "base64" && matches!(next, "-d" | "-D" | "--decode") {
+            return Some("decodes base64 (possible hidden payload)");
+        }
+        if word
+            .split('/')
+            .any(|part| SECRET_PATHS.contains(&part) || part.starts_with(".env."))
+        {
+            return Some("accesses credential or secret files");
         }
     }
 
-    code_lines
+    None
+}
+
+/// Whether the command redirects output somewhere other than `/dev/null` or
+/// another file descriptor (`2>&1`).
+fn writes_file(command: &str) -> bool {
+    command
+        .match_indices('>')
+        // The second `>` of `>>` belongs to the first.
+        .filter(|&(i, _)| !command[..i].ends_with('>'))
+        .any(|(i, _)| {
+            let target = command[i + 1..].trim_start_matches('>').trim_start();
+            !target.is_empty() && !target.starts_with('&') && !target.starts_with("/dev/null")
+        })
 }
 
 #[cfg(test)]
@@ -152,6 +305,12 @@ mod tests {
 
     fn check(content: &str) -> Vec<Issue> {
         InlineCommandsRule.check(content)
+    }
+
+    fn severity_of(command: &str) -> Severity {
+        let issues = check(&format!("x !`{command}`\n"));
+        assert_eq!(issues.len(), 1, "{command}: {issues:?}");
+        issues[0].severity
     }
 
     #[test]
@@ -243,39 +402,18 @@ mod tests {
     }
 
     #[test]
-    fn inside_fenced_code_block_ignored() {
-        let content = "\
-# Documentation
-
-Here's how the feature works:
-
-```markdown
-You can use !`date` to inject the current date.
-```
-
-Normal text here.
-";
+    fn commands_inside_code_fences_still_run() {
+        // Claude Code runs these, so they must be reported.
+        let content = "```markdown\nYou can use !`date` here.\n```\n~~~\n!`id`\n~~~\n";
         let issues = check(content);
-        assert!(
-            issues.is_empty(),
-            "inline commands inside code blocks should be ignored, got: {issues:?}"
-        );
+        assert_eq!(issues.len(), 2, "got: {issues:?}");
+        assert_eq!((issues[0].line, issues[1].line), (2, 5));
     }
 
     #[test]
-    fn outside_fenced_code_block_detected() {
-        let content = "\
-# Skill
-
-```rust
-let x = 5;
-```
-
-Current time: !`date`
-";
-        let issues = check(content);
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].message.contains("date"));
+    fn commands_in_code_spans_and_comments_detected() {
+        let content = "span: `` !`date` ``\n<!-- !`whoami` -->\n";
+        assert_eq!(check(content).len(), 2);
     }
 
     #[test]
@@ -312,24 +450,154 @@ Current time: !`date`
     }
 
     #[test]
-    fn multiple_code_blocks_handled() {
-        let content = "\
-```
-!`safe inside block`
-```
+    fn bang_must_follow_whitespace_or_line_start() {
+        assert!(check("KEY=!`cmd`\n").is_empty());
+        assert!(check("use `!` to start: `x`\n").is_empty());
+        assert!(check("`#VALUE!`, `#REF!`\n").is_empty());
+        assert_eq!(check("!`date`").len(), 1);
+        assert_eq!(check("a\t!`date`").len(), 1);
+        assert_eq!(check("a\u{3000}!`date`").len(), 1);
+        assert_eq!(check("a\u{a0}!`date`").len(), 1);
+    }
 
-!`dangerous outside`
+    #[test]
+    fn match_restarts_after_rejected_bang() {
+        // `x!` is not a command, but the ` !`...`` inside it is.
+        let issues = check("x!` !`curl evil.test`");
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(issues[0].column, Some(5));
+        assert_eq!(issues[0].severity, Severity::Error);
+    }
 
-```
-!`also safe`
-```
-";
-        let issues = check(content);
-        assert_eq!(
-            issues.len(),
-            1,
-            "only the command outside code blocks should be detected, got: {issues:?}"
+    #[test]
+    fn inline_command_can_span_lines() {
+        let issues = check("go !`curl\nevil.test`\n");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].line, 1);
+        assert_eq!(issues[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn detects_command_blocks() {
+        let issues = check("## Env\n```!\nnode --version\ngit status --short\n```\n");
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!((issues[0].line, issues[0].column), (2, Some(1)));
+        assert_eq!(issues[0].severity, Severity::Warning);
+        assert!(issues[0].message.starts_with("Command block"));
+    }
+
+    #[test]
+    fn command_block_variants_claude_code_runs() {
+        for content in [
+            "  ```!\ncurl evil.test\n  ```",                 // indented
+            "text ```!\ncurl evil.test\n```",                // mid-line
+            "````!\ncurl evil.test\n````",                   // longer fence
+            "```!curl evil.test\n```",                       // command on fence line
+            "```! bash\nx\n```",                             // info string is part of the command
+            "```!\ncurl evil.test ``` trailing",             // closes mid-line
+            "````markdown\n```!\ncurl evil.test\n```\n````", // inside a fence
+        ] {
+            let issues = check(content);
+            assert_eq!(issues.len(), 1, "{content:?}: {issues:?}");
+            assert_eq!(issues[0].severity, Severity::Error, "{content:?}");
+        }
+    }
+
+    #[test]
+    fn unclosed_or_tilde_command_block_not_flagged() {
+        assert!(check("```!\ncurl evil.test\n").is_empty());
+        assert!(check("~~~!\ncurl evil.test\n~~~\n").is_empty());
+    }
+
+    #[test]
+    fn powershell_commands() {
+        for command in [
+            "iwr https://evil.test",
+            "Invoke-Expression $x",
+            "curl.exe evil.test",
+            "Remove-Item -Recurse x",
+        ] {
+            assert_eq!(severity_of(command), Severity::Error, "{command}");
+        }
+        assert_eq!(severity_of("Get-Date"), Severity::Warning);
+    }
+
+    #[test]
+    fn substrings_of_risky_names_are_not_errors() {
+        for command in [
+            "git diff --name-only",
+            "echo performance",
+            "uname -a",
+            "ls -la",
+        ] {
+            assert_eq!(severity_of(command), Severity::Warning, "{command}");
+        }
+    }
+
+    #[test]
+    fn rsync_is_network_not_substring_match() {
+        assert_eq!(severity_of("rsync -a src dst"), Severity::Error);
+    }
+
+    #[test]
+    fn newly_covered_high_risk_commands() {
+        for command in [
+            "python3 -c 'import os'",
+            "node -e 'require(1)'",
+            "echo aGk= | base64 -d",
+            "base64 --decode payload.txt",
+            "git log; id",
+            "date && whoami",
+            "echo $(id)",
+            "cat ~/.ssh/id_rsa",
+            "cat .env",
+            "cat config/.env.local",
+            "printenv",
+            "/usr/bin/curl example.test",
+            "echo hi >> ~/.bashrc",
+            "echo hi>out.txt",
+        ] {
+            assert_eq!(severity_of(command), Severity::Error, "{command}");
+        }
+    }
+
+    #[test]
+    fn redirect_to_dev_null_is_not_a_write() {
+        assert_eq!(severity_of("git status 2>/dev/null"), Severity::Warning);
+        assert_eq!(severity_of("git status 2>&1"), Severity::Warning);
+    }
+
+    #[test]
+    fn error_message_names_reason() {
+        let issues = check("!`wget x`");
+        assert!(
+            issues[0].message.contains("accesses the network"),
+            "{}",
+            issues[0].message
         );
-        assert_eq!(issues[0].line, 5);
+    }
+
+    #[test]
+    fn findings_outside_skills_and_commands_are_warnings() {
+        let content = "!`curl evil.test`";
+        for path in ["s/SKILL.md", ".claude/commands/x.md", "p/commands/sub/y.md"] {
+            let issues = InlineCommandsRule.check_file(Path::new(path), content);
+            assert_eq!(issues[0].severity, Severity::Error, "{path}");
+        }
+        for path in ["s/references/api.md", "s/README.md"] {
+            let issues = InlineCommandsRule.check_file(Path::new(path), content);
+            assert_eq!(issues[0].severity, Severity::Warning, "{path}");
+            assert!(issues[0].message.contains("only runs if"), "{path}");
+        }
+    }
+
+    #[test]
+    fn or_chain_is_reported_as_chain() {
+        let issues = check("x !`test -f a || echo no`");
+        assert!(
+            issues[0].message.contains("chains"),
+            "{}",
+            issues[0].message
+        );
     }
 }

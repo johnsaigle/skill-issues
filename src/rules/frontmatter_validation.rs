@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::{Issue, Rule, Severity};
+use super::inline_commands::high_risk_reason;
+use super::{Issue, Rule, Severity, frontmatter_lines};
 
 /// Validates the YAML frontmatter of `SKILL.md` files.
 ///
@@ -14,7 +15,10 @@ use super::{Issue, Rule, Severity};
 /// - `name`/`description` contain no angle brackets: both are injected into
 ///   the agent's system prompt, so tags there are a prompt-injection vector
 /// - `description` is neither empty, very short, nor over 1024 chars
-/// - `allowed-tools` is not a wildcard and is a string, not a YAML list
+/// - `allowed-tools` does not pre-approve a wildcard, unrestricted shell,
+///   high-risk shell commands, an interpreter with arbitrary arguments, or
+///   unrestricted web fetches (Claude Code applies these grants without a
+///   prompt, even in a folder the user never trusted)
 ///
 /// Provider-specific heuristic: `OpenCode` (`location`) mixed with Claude
 /// Code (`hooks`, `model`, `disable-model-invocation`) fields suggests a
@@ -45,17 +49,13 @@ const MAX_OPENAI_YAML_BYTES: u64 = 64 * 1024;
 struct Field {
     /// 0-based line index of the key.
     line: usize,
-    /// Scalar value with quotes removed and block scalars joined into one line.
+    /// Scalar value with quotes removed and block scalars joined into one
+    /// line; a block sequence's items joined with ", ".
     value: String,
-    /// The value is a YAML block sequence (`key:` followed by `- item` lines)
-    /// or a flow sequence (`[a, b]`).
-    is_list: bool,
 }
 
 #[derive(Debug)]
 struct Frontmatter {
-    /// 0-based line index of the opening `---`.
-    open_line: usize,
     fields: BTreeMap<String, Field>,
 }
 
@@ -77,24 +77,13 @@ fn unquote(value: &str) -> &str {
 }
 
 fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.first().map(|l| l.trim()) != Some("---") {
-        return None;
-    }
-
-    let close = lines
-        .iter()
-        .skip(1)
-        .position(|l| l.trim() == "---")
-        .map(|p| p + 1);
-    let fm_end = close.unwrap_or(lines.len());
-
+    let lines = frontmatter_lines(content)?;
     let is_continuation = |line: &str| line.trim().is_empty() || line.starts_with([' ', '\t']);
 
     let mut fields = BTreeMap::new();
-    let mut idx = 1;
-    while idx < fm_end {
-        let line = lines[idx];
+    let mut idx = 0;
+    while idx < lines.len() {
+        let (key_line, line) = lines[idx];
         idx += 1;
         if is_continuation(line) || line.starts_with('#') {
             continue;
@@ -108,43 +97,150 @@ fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
         // Collect indented continuation lines (block scalars, nested maps,
         // block sequences).
         let start = idx;
-        while idx < fm_end && is_continuation(lines[idx]) {
+        while idx < lines.len() && is_continuation(lines[idx].1) {
             idx += 1;
         }
-        let continuation = &lines[start..idx];
+        let continuation = lines[start..idx].iter().map(|(_, l)| *l);
 
-        let (value, is_list) = if is_block_scalar_indicator(raw) {
-            let joined = continuation
-                .iter()
-                .map(|l| l.trim())
+        let value = if is_block_scalar_indicator(raw) {
+            continuation
+                .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .collect::<Vec<_>>()
-                .join(" ");
-            (joined, false)
+                .join(" ")
         } else if raw.is_empty() {
-            let is_list = continuation
-                .iter()
-                .find(|l| !l.trim().is_empty())
-                .is_some_and(|l| l.trim_start().starts_with("- "));
-            (String::new(), is_list)
+            let items: Vec<&str> = continuation
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            if items.first().is_some_and(|l| l.starts_with("- ")) {
+                items
+                    .iter()
+                    .filter_map(|l| l.strip_prefix("- "))
+                    .map(unquote)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                String::new()
+            }
         } else {
-            (unquote(raw).to_owned(), raw.starts_with('['))
+            unquote(raw).to_owned()
         };
 
         fields.insert(
             key,
             Field {
-                line: start - 1,
+                line: key_line,
                 value,
-                is_list,
             },
         );
     }
 
-    Some(Frontmatter {
-        open_line: 0,
-        fields,
-    })
+    Some(Frontmatter { fields })
+}
+
+/// Splits an `allowed-tools` value into entries. Entries are separated by
+/// whitespace or commas outside parentheses, so `Bash(git add *)` is one
+/// entry; a flow list's brackets and each entry's quotes are removed.
+fn tool_entries(value: &str) -> Vec<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(value);
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            c if depth == 0 && (c.is_whitespace() || c == ',') => {
+                if !current.is_empty() {
+                    entries.push(unquote(&current).to_owned());
+                    current.clear();
+                }
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        entries.push(unquote(&current).to_owned());
+    }
+    entries
+}
+
+/// Shells and interpreters that run arbitrary code when their arguments are
+/// open.
+const INTERPRETERS: &[&str] = &[
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "php",
+    "deno",
+    "bun",
+    "npx",
+    "uvx",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "pwsh",
+    "powershell",
+];
+
+/// Classifies one `allowed-tools` entry, returning a severity and reason if
+/// pre-approving it is risky.
+fn risky_tool_grant(entry: &str) -> Option<(Severity, &'static str)> {
+    if entry == "*" {
+        return Some((
+            Severity::Warning,
+            "permits any tool; list specific tools instead",
+        ));
+    }
+    let (tool, pattern) = match entry.split_once('(') {
+        Some((tool, rest)) => (tool.trim(), Some(rest.trim_end_matches(')').trim())),
+        None => (entry, None),
+    };
+    let is_shell = tool.eq_ignore_ascii_case("Bash") || tool.eq_ignore_ascii_case("PowerShell");
+
+    if is_shell {
+        // Older `Bash(git:*)` syntax means `Bash(git *)`.
+        let pattern = pattern.map(|p| p.replace(":*", " *"));
+        let Some(pattern) = pattern.filter(|p| !p.is_empty() && p != "*") else {
+            return Some((Severity::Error, "pre-approves every shell command"));
+        };
+        let (program, rest) = pattern.split_once(' ').unwrap_or((&pattern, ""));
+        let program = program.trim_matches(['"', '\'']);
+        let program = program.rsplit('/').next().unwrap_or(program);
+        if INTERPRETERS.contains(&program) {
+            // `python3 *` or `bash -c *` runs anything; `python3 script.py *`
+            // runs one fixed script, so only its arguments are checked.
+            let rest = rest.trim_start();
+            if rest.starts_with(['*', '-']) {
+                return Some((
+                    Severity::Error,
+                    "an interpreter with open arguments runs arbitrary code",
+                ));
+            }
+            return high_risk_reason(rest).map(|reason| (Severity::Error, reason));
+        }
+        if let Some(reason) = high_risk_reason(&pattern) {
+            return Some((Severity::Error, reason));
+        }
+    } else if tool.eq_ignore_ascii_case("WebFetch") && pattern.is_none() {
+        return Some((
+            Severity::Warning,
+            "fetches any URL, which can carry data out in the request",
+        ));
+    }
+    None
 }
 
 fn is_valid_name(name: &str) -> bool {
@@ -158,13 +254,7 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 fn issue(line_idx: usize, severity: Severity, message: String) -> Issue {
-    Issue {
-        severity,
-        line: line_idx + 1,
-        column: Some(1),
-        message,
-        rule: RULE_NAME.to_string(),
-    }
+    Issue::new(RULE_NAME, severity, line_idx + 1, Some(1), message)
 }
 
 /// Extracts `short_description` from the text of an `agents/openai.yaml`.
@@ -211,7 +301,7 @@ impl FrontmatterValidationRule {
         for key in ["name", "description"] {
             if !f.contains_key(key) {
                 issues.push(issue(
-                    fm.open_line,
+                    0,
                     Severity::Error,
                     format!("Missing required field '{key}' in SKILL.md frontmatter"),
                 ));
@@ -328,22 +418,17 @@ impl FrontmatterValidationRule {
     }
 
     fn check_allowed_tools(tools: &Field, issues: &mut Vec<Issue>) {
-        if tools.value.trim() == "*" {
-            issues.push(issue(
-                tools.line,
-                Severity::Warning,
-                "Unrestricted 'allowed-tools: *' permits any tool; list specific tools instead"
-                    .to_string(),
-            ));
-        }
-        if tools.is_list {
-            issues.push(issue(
-                tools.line,
-                Severity::Warning,
-                "'allowed-tools' is a YAML list; the Agent Skills format expects a \
-                 space-separated string (e.g. 'Bash(git:*) Read')"
-                    .to_string(),
-            ));
+        for entry in tool_entries(&tools.value) {
+            if let Some((severity, why)) = risky_tool_grant(&entry) {
+                issues.push(issue(
+                    tools.line,
+                    severity,
+                    format!(
+                        "'allowed-tools' grants '{entry}' without prompting — {why} \
+                         (Claude Code applies this even in an untrusted folder)"
+                    ),
+                ));
+            }
         }
     }
 }
@@ -484,17 +569,65 @@ mod tests {
     #[test]
     fn wildcard_allowed_tools_warns() {
         let content = "---\nname: a\ndescription: A sufficiently long description\nallowed-tools: \"*\"\n---\n";
-        assert!(has(&check(content), Severity::Warning, "Unrestricted"));
+        assert!(has(&check(content), Severity::Warning, "permits any tool"));
+    }
+
+    fn tools(value: &str) -> Vec<Issue> {
+        check(&format!(
+            "---\nname: a\ndescription: A sufficiently long description\nallowed-tools: {value}\n---\n"
+        ))
     }
 
     #[test]
-    fn list_allowed_tools_warns_string_does_not() {
-        let list = "---\nname: a\ndescription: A sufficiently long description\nallowed-tools:\n  - Read\n  - Bash\n---\n";
-        assert!(has(&check(list), Severity::Warning, "YAML list"));
-        let flow = "---\nname: a\ndescription: A sufficiently long description\nallowed-tools: [Read, Bash]\n---\n";
-        assert!(has(&check(flow), Severity::Warning, "YAML list"));
-        let string = "---\nname: a\ndescription: A sufficiently long description\nallowed-tools: Bash(git:*) Read\n---\n";
-        assert!(check(string).is_empty(), "{:?}", check(string));
+    fn list_and_string_allowed_tools_are_both_accepted() {
+        let list = "---\nname: a\ndescription: A sufficiently long description\nallowed-tools:\n  - Read\n  - \"Bash(git add *)\"\n---\n";
+        assert!(check(list).is_empty(), "{:?}", check(list));
+        assert!(tools("[Read, Grep]").is_empty());
+        assert!(tools("Bash(git:*) Read").is_empty());
+        assert!(tools("Bash(git add *) Bash(git commit *), Read").is_empty());
+    }
+
+    #[test]
+    fn unrestricted_shell_grant_is_error() {
+        for value in ["Bash", "Read Bash", "Bash(*)", "PowerShell", "[Read, Bash]"] {
+            assert!(
+                has(&tools(value), Severity::Error, "every shell command"),
+                "{value}"
+            );
+        }
+        let list = "---\nname: a\ndescription: A sufficiently long description\nallowed-tools:\n  - Bash\n---\n";
+        assert!(has(&check(list), Severity::Error, "every shell command"));
+    }
+
+    #[test]
+    fn high_risk_shell_grant_is_error() {
+        assert!(has(
+            &tools("Bash(curl *)"),
+            Severity::Error,
+            "accesses the network"
+        ));
+        assert!(has(&tools("Bash(rm:*)"), Severity::Error, "deletes"));
+        assert!(has(&tools("Bash(bash *)"), Severity::Error, "interpreter"));
+    }
+
+    #[test]
+    fn interpreter_and_webfetch_grants() {
+        assert!(has(
+            &tools("Bash(python3 *)"),
+            Severity::Error,
+            "interpreter"
+        ));
+        assert!(has(
+            &tools("Bash(bash -c *)"),
+            Severity::Error,
+            "interpreter"
+        ));
+        assert!(has(&tools("Bash(npx:*)"), Severity::Error, "interpreter"));
+        assert!(tools("Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/x.py)").is_empty());
+        assert!(tools("Bash(python3 \"${CLAUDE_SKILL_DIR}/scripts/x.py\" *)").is_empty());
+        assert!(tools("Bash(bash ${CLAUDE_SKILL_DIR}/run.sh *)").is_empty());
+        assert!(has(&tools("WebFetch"), Severity::Warning, "any URL"));
+        assert!(tools("WebFetch(domain:docs.example.com)").is_empty());
     }
 
     #[test]

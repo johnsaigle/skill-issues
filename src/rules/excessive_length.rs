@@ -40,32 +40,32 @@ impl Rule for ExcessiveLengthRule {
         let line_count = content.lines().count();
 
         if line_count > self.max_lines {
-            issues.push(Issue {
-                severity: Severity::Warning,
-                line: line_count,
-                column: None,
-                message: format!(
+            issues.push(Issue::new(
+                self.name(),
+                Severity::Warning,
+                line_count,
+                None,
+                format!(
                     "File has {line_count} lines (threshold: {}) — oversized files may hide \
                      bundled payloads or obfuscated content",
                     self.max_lines
                 ),
-                rule: self.name().to_string(),
-            });
+            ));
         }
 
         if content.len() > self.max_bytes {
-            issues.push(Issue {
-                severity: Severity::Warning,
-                line: 1,
-                column: None,
-                message: format!(
+            issues.push(Issue::new(
+                self.name(),
+                Severity::Warning,
+                1,
+                None,
+                format!(
                     "File is {} KiB (threshold: {} KiB) — oversized files may be truncated \
                      by marketplaces or reviewers, hiding content from audit",
                     content.len() / 1024,
                     self.max_bytes / 1024
                 ),
-                rule: self.name().to_string(),
-            });
+            ));
         }
 
         issues

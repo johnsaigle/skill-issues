@@ -1,4 +1,6 @@
-use super::{Issue, Rule, Severity};
+use super::{
+    Issue, Rule, Severity, invisible_char_description, is_emoji_presentation, is_unicode_tag,
+};
 
 pub struct InvisibleCharactersRule {
     pub include_confusable_spaces: bool,
@@ -16,27 +18,18 @@ impl InvisibleCharactersRule {
         self
     }
 
-    /// Check if a character is a Unicode tag (U+E0000-U+E007F)
-    fn is_unicode_tag(ch: char) -> bool {
-        let cp = ch as u32;
-        (0xE0000..=0xE007F).contains(&cp)
-    }
-
-    /// Decode a Unicode tag character to ASCII
-    fn decode_unicode_tag(ch: char) -> Option<char> {
-        let cp = ch as u32;
-        if (0xE0000..=0xE007F).contains(&cp) {
-            // U+E0000 + ascii_code
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "Tag codepoints are in range 0xE0000-0xE007F, difference always fits in u8"
-            )]
-            let ascii_code = (cp - 0xE0000) as u8;
-            if ascii_code <= 0x7F {
-                return Some(ascii_code as char);
-            }
+    /// Decodes a Unicode tag character (U+E0000 + ASCII code) to its ASCII
+    /// character, or returns `None` for any other character.
+    const fn decode_unicode_tag(ch: char) -> Option<char> {
+        if !is_unicode_tag(ch) {
+            return None;
         }
-        None
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "Tag codepoints are U+E0000-U+E007F, so the offset fits in u8"
+        )]
+        let ascii = (ch as u32 - 0xE0000) as u8;
+        Some(ascii as char)
     }
 
     /// Returns `true` when `ch` is a Unicode codepoint that commonly serves as
@@ -101,108 +94,6 @@ impl InvisibleCharactersRule {
         )
     }
 
-    /// Returns true if `ch` is a variation selector used for emoji/text
-    /// presentation (VS-15 = text style, VS-16 = emoji style).
-    const fn is_emoji_variation_selector(ch: char) -> bool {
-        matches!(ch, '\u{FE0E}' | '\u{FE0F}')
-    }
-
-    /// Get the name/description for an invisible character
-    fn get_char_description(ch: char) -> Option<&'static str> {
-        match ch {
-            // Zero-width characters
-            '\u{200B}' => Some("ZERO WIDTH SPACE"),
-            '\u{200C}' => Some("ZERO WIDTH NON-JOINER"),
-            '\u{200D}' => Some("ZERO WIDTH JOINER"),
-            '\u{FEFF}' => Some("ZERO WIDTH NO-BREAK SPACE (BOM)"),
-            '\u{2060}' => Some("WORD JOINER"),
-            '\u{00AD}' => Some("SOFT HYPHEN"),
-            '\u{180E}' => Some("MONGOLIAN VOWEL SEPARATOR"),
-            '\u{034F}' => Some("COMBINING GRAPHEME JOINER"),
-
-            // Directional marks
-            '\u{200E}' => Some("LEFT-TO-RIGHT MARK"),
-            '\u{200F}' => Some("RIGHT-TO-LEFT MARK"),
-            '\u{061C}' => Some("ARABIC LETTER MARK"),
-            '\u{202A}' => Some("LEFT-TO-RIGHT EMBEDDING"),
-            '\u{202B}' => Some("RIGHT-TO-LEFT EMBEDDING"),
-            '\u{202C}' => Some("POP DIRECTIONAL FORMATTING"),
-            '\u{202D}' => Some("LEFT-TO-RIGHT OVERRIDE"),
-            '\u{202E}' => Some("RIGHT-TO-LEFT OVERRIDE"),
-            '\u{2066}' => Some("LEFT-TO-RIGHT ISOLATE"),
-            '\u{2067}' => Some("RIGHT-TO-LEFT ISOLATE"),
-            '\u{2068}' => Some("FIRST STRONG ISOLATE"),
-            '\u{2069}' => Some("POP DIRECTIONAL ISOLATE"),
-
-            // Invisible operators
-            '\u{2061}' => Some("FUNCTION APPLICATION (invisible operator)"),
-            '\u{2062}' => Some("INVISIBLE TIMES"),
-            '\u{2063}' => Some("INVISIBLE SEPARATOR"),
-            '\u{2064}' => Some("INVISIBLE PLUS"),
-
-            // Deprecated format controls
-            '\u{206A}' => Some("INHIBIT SYMMETRIC SWAPPING (deprecated)"),
-            '\u{206B}' => Some("ACTIVATE SYMMETRIC SWAPPING (deprecated)"),
-            '\u{206C}' => Some("INHIBIT ARABIC FORM SHAPING (deprecated)"),
-            '\u{206D}' => Some("ACTIVATE ARABIC FORM SHAPING (deprecated)"),
-            '\u{206E}' => Some("NATIONAL DIGIT SHAPES (deprecated)"),
-            '\u{206F}' => Some("NOMINAL DIGIT SHAPES (deprecated)"),
-
-            // Variation Selectors 1-16 (U+FE00-U+FE0F)
-            '\u{FE00}'..='\u{FE0F}' => {
-                let vs_num = ch as u32 - 0xFE00 + 1;
-                Some(match vs_num {
-                    1 => "VARIATION SELECTOR-1",
-                    2 => "VARIATION SELECTOR-2",
-                    3 => "VARIATION SELECTOR-3",
-                    4 => "VARIATION SELECTOR-4",
-                    5 => "VARIATION SELECTOR-5",
-                    6 => "VARIATION SELECTOR-6",
-                    7 => "VARIATION SELECTOR-7",
-                    8 => "VARIATION SELECTOR-8",
-                    9 => "VARIATION SELECTOR-9",
-                    10 => "VARIATION SELECTOR-10",
-                    11 => "VARIATION SELECTOR-11",
-                    12 => "VARIATION SELECTOR-12",
-                    13 => "VARIATION SELECTOR-13",
-                    14 => "VARIATION SELECTOR-14",
-                    15 => "VARIATION SELECTOR-15",
-                    16 => "VARIATION SELECTOR-16",
-                    _ => "VARIATION SELECTOR",
-                })
-            }
-
-            // Unicode Tags
-            ch if Self::is_unicode_tag(ch) => Some("UNICODE TAG (ASCII smuggling)"),
-
-            // Variation Selectors 17-256 (U+E0100-U+E01EF)
-            '\u{E0100}'..='\u{E01EF}' => {
-                let vs_num = ch as u32 - 0xE0100 + 17;
-                Some(match vs_num {
-                    17 => "VARIATION SELECTOR-17",
-                    18 => "VARIATION SELECTOR-18",
-                    19 => "VARIATION SELECTOR-19",
-                    20 => "VARIATION SELECTOR-20",
-                    21 => "VARIATION SELECTOR-21",
-                    22 => "VARIATION SELECTOR-22",
-                    23 => "VARIATION SELECTOR-23",
-                    24 => "VARIATION SELECTOR-24",
-                    25 => "VARIATION SELECTOR-25",
-                    26 => "VARIATION SELECTOR-26",
-                    27 => "VARIATION SELECTOR-27",
-                    28 => "VARIATION SELECTOR-28",
-                    29 => "VARIATION SELECTOR-29",
-                    30 => "VARIATION SELECTOR-30",
-                    31 => "VARIATION SELECTOR-31",
-                    32 => "VARIATION SELECTOR-32",
-                    _ => "VARIATION SELECTOR",
-                })
-            }
-
-            _ => None,
-        }
-    }
-
     /// Check if character is a confusable/suspicious space
     const fn is_confusable_space(ch: char) -> Option<&'static str> {
         match ch {
@@ -236,114 +127,86 @@ impl Rule for InvisibleCharactersRule {
 
     fn check(&self, content: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
-        let mut unicode_tag_payloads: Vec<(usize, usize, String)> = Vec::new(); // (line, start_col, decoded)
 
         for (line_num, line) in content.lines().enumerate() {
             let line_idx = line_num + 1;
-            let mut current_tag_run: Option<(usize, Vec<char>)> = None; // (start_col, chars)
+            // (start column, decoded ASCII) of the Unicode tag run in progress
+            let mut tag_run: Option<(usize, String)> = None;
             let mut prev_char: Option<char> = None;
 
             for (col, ch) in line.chars().enumerate() {
                 let col_idx = col + 1;
 
-                // Skip VS-15/VS-16 when they follow an emoji base character.
-                // This is standard emoji presentation formatting (e.g. ❤\uFE0F).
-                if Self::is_emoji_variation_selector(ch)
-                    && let Some(prev) = prev_char
-                    && Self::is_emoji_base(prev)
-                {
+                // Unicode tags are reported once per run, with the hidden
+                // text decoded so the reviewer can see what was smuggled.
+                if let Some(decoded) = Self::decode_unicode_tag(ch) {
+                    tag_run
+                        .get_or_insert_with(|| (col_idx, String::new()))
+                        .1
+                        .push(decoded);
+                    prev_char = Some(ch);
+                    continue;
+                }
+                if let Some((start_col, payload)) = tag_run.take() {
+                    issues.push(self.tag_run_issue(line_idx, start_col, &payload));
+                }
+
+                if is_emoji_presentation(prev_char, ch) {
                     prev_char = Some(ch);
                     continue;
                 }
 
-                // Check for Unicode tag characters
-                if Self::is_unicode_tag(ch) {
-                    if current_tag_run.is_none() {
-                        current_tag_run = Some((col_idx, Vec::new()));
-                    }
-                    if let Some((_, ref mut chars)) = current_tag_run
-                        && let Some(decoded) = Self::decode_unicode_tag(ch)
-                    {
-                        chars.push(decoded);
-                    }
-
-                    issues.push(Issue {
-                        severity: Severity::Error,
-                        line: line_idx,
-                        column: Some(col_idx),
-                        message: format!(
-                            "Unicode tag character (ASCII smuggling): U+{:04X}",
-                            ch as u32
-                        ),
-                        rule: self.name().to_string(),
-                    });
-                    continue;
-                } else if let Some((start_col, decoded_chars)) = current_tag_run.take() {
-                    // End of tag run - save the decoded payload
-                    if !decoded_chars.is_empty() {
-                        let decoded: String = decoded_chars.iter().collect();
-                        unicode_tag_payloads.push((line_idx, start_col, decoded));
-                    }
+                if let Some(description) = invisible_char_description(ch) {
+                    issues.push(Issue::new(
+                        self.name(),
+                        Severity::Error,
+                        line_idx,
+                        Some(col_idx),
+                        format!("Invisible character: {description}"),
+                    ));
                 }
 
-                // Check for invisible characters
-                if let Some(description) = Self::get_char_description(ch) {
-                    let message = if Self::is_unicode_tag(ch) {
-                        // Already handled above
-                        continue;
-                    } else {
-                        format!("Invisible character: {description}")
-                    };
-
-                    issues.push(Issue {
-                        severity: Severity::Error,
-                        line: line_idx,
-                        column: Some(col_idx),
-                        message,
-                        rule: self.name().to_string(),
-                    });
-                }
-
-                // Check for confusable spaces if enabled
                 if self.include_confusable_spaces
                     && let Some(description) = Self::is_confusable_space(ch)
                 {
-                    issues.push(Issue {
-                        severity: Severity::Warning,
-                        line: line_idx,
-                        column: Some(col_idx),
-                        message: format!("Confusable space: {description}"),
-                        rule: self.name().to_string(),
-                    });
+                    issues.push(Issue::new(
+                        self.name(),
+                        Severity::Warning,
+                        line_idx,
+                        Some(col_idx),
+                        format!("Confusable space: {description}"),
+                    ));
                 }
 
                 prev_char = Some(ch);
             }
 
-            // Handle tag run that extends to end of line
-            if let Some((start_col, decoded_chars)) = current_tag_run
-                && !decoded_chars.is_empty()
-            {
-                let decoded: String = decoded_chars.iter().collect();
-                unicode_tag_payloads.push((line_idx, start_col, decoded));
+            if let Some((start_col, payload)) = tag_run {
+                issues.push(self.tag_run_issue(line_idx, start_col, &payload));
             }
         }
 
-        // Add summary issues for Unicode tag payloads
-        for (line, col, payload) in unicode_tag_payloads {
-            issues.push(Issue {
-                severity: Severity::Error,
-                line,
-                column: Some(col),
-                message: format!(
-                    "Decoded Unicode tag payload: '{}'",
-                    payload.replace('\n', "\\n").replace('\r', "\\r")
-                ),
-                rule: self.name().to_string(),
-            });
-        }
-
         issues
+    }
+}
+
+impl InvisibleCharactersRule {
+    fn tag_run_issue(&self, line: usize, column: usize, payload: &str) -> Issue {
+        Issue::new(
+            self.name(),
+            Severity::Error,
+            line,
+            Some(column),
+            format!(
+                "{} hidden Unicode tag character{} (ASCII smuggling), decoded: '{payload}'",
+                payload.chars().count(),
+                if payload.chars().count() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+            ),
+        )
     }
 }
 
@@ -425,13 +288,25 @@ mod tests {
         let content = "Normal text\u{E0048}\u{E0069}here";
         let issues = rule.check(content);
 
-        // Should detect individual tag chars + decoded payload
-        assert!(issues.iter().any(|i| i.message.contains("Unicode tag")));
+        // One finding per run, at the run's first character, with the payload
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].column, Some(12));
         assert!(
-            issues
-                .iter()
-                .any(|i| i.message.contains("Decoded Unicode tag payload: 'Hi'"))
+            issues[0]
+                .message
+                .contains("2 hidden Unicode tag characters (ASCII smuggling), decoded: 'Hi'")
         );
+    }
+
+    #[test]
+    fn separate_tag_runs_are_reported_separately() {
+        let rule = InvisibleCharactersRule::new();
+        let content = "a\u{E0041}b\u{E0042}\u{E0043}\nc\u{E0044}";
+        let messages: Vec<String> = rule.check(content).into_iter().map(|i| i.message).collect();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert!(messages[0].ends_with("decoded: 'A'"));
+        assert!(messages[1].ends_with("decoded: 'BC'"));
+        assert!(messages[2].ends_with("decoded: 'D'"));
     }
 
     #[test]

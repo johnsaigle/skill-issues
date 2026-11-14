@@ -1,8 +1,73 @@
-use std::collections::HashMap;
-
 use super::{Issue, Rule, Severity};
 
 pub struct UnicodeHomoglyphRule;
+
+/// Returns `(description, ASCII lookalike)` for a character that renders like
+/// an ASCII letter or digit.
+///
+/// Covers the Cyrillic and Greek letters that are near-identical to Latin
+/// ones, and full-width Latin letters and digits (U+FF10-U+FF5A). Greek
+/// letters with no Latin twin (α, β, π, Σ, ...) are not listed, so ordinary
+/// maths notation is not flagged.
+fn lookalike(ch: char) -> Option<(String, char)> {
+    let (script, ascii) = match ch {
+        // Cyrillic lowercase
+        'а' => ("Cyrillic", 'a'),
+        'е' => ("Cyrillic", 'e'),
+        'о' => ("Cyrillic", 'o'),
+        'р' => ("Cyrillic", 'p'),
+        'с' => ("Cyrillic", 'c'),
+        'х' => ("Cyrillic", 'x'),
+        'у' => ("Cyrillic", 'y'),
+        'і' => ("Cyrillic", 'i'),
+        'ј' => ("Cyrillic", 'j'),
+        'ԛ' => ("Cyrillic", 'q'),
+        'ѕ' => ("Cyrillic", 's'),
+        'һ' => ("Cyrillic", 'h'),
+        'ԁ' => ("Cyrillic", 'd'),
+        'ԝ' => ("Cyrillic", 'w'),
+        // Cyrillic uppercase
+        'А' => ("Cyrillic", 'A'),
+        'В' => ("Cyrillic", 'B'),
+        'Е' => ("Cyrillic", 'E'),
+        'К' => ("Cyrillic", 'K'),
+        'М' => ("Cyrillic", 'M'),
+        'Н' => ("Cyrillic", 'H'),
+        'О' => ("Cyrillic", 'O'),
+        'Р' => ("Cyrillic", 'P'),
+        'С' => ("Cyrillic", 'C'),
+        'Т' => ("Cyrillic", 'T'),
+        'Х' => ("Cyrillic", 'X'),
+        'У' => ("Cyrillic", 'Y'),
+        'І' => ("Cyrillic", 'I'),
+        'Ј' => ("Cyrillic", 'J'),
+        'Ѕ' => ("Cyrillic", 'S'),
+        // Greek
+        'ο' => ("Greek", 'o'),
+        'ν' => ("Greek", 'v'),
+        'Α' => ("Greek", 'A'),
+        'Β' => ("Greek", 'B'),
+        'Ε' => ("Greek", 'E'),
+        'Ζ' => ("Greek", 'Z'),
+        'Η' => ("Greek", 'H'),
+        'Ι' => ("Greek", 'I'),
+        'Κ' => ("Greek", 'K'),
+        'Μ' => ("Greek", 'M'),
+        'Ν' => ("Greek", 'N'),
+        'Ο' => ("Greek", 'O'),
+        'Ρ' => ("Greek", 'P'),
+        'Τ' => ("Greek", 'T'),
+        'Υ' => ("Greek", 'Y'),
+        'Χ' => ("Greek", 'X'),
+        // Full-width digits and Latin letters map to ASCII by a fixed offset.
+        '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ' => {
+            let ascii = char::from_u32(ch as u32 - 0xFEE0)?;
+            ("Full-width", ascii)
+        }
+        _ => return None,
+    };
+    Some((format!("{script} {ch} (U+{:04X})", ch as u32), ascii))
+}
 
 impl Rule for UnicodeHomoglyphRule {
     fn name(&self) -> &'static str {
@@ -11,35 +76,18 @@ impl Rule for UnicodeHomoglyphRule {
 
     fn check(&self, content: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
-        // Common homoglyphs that look like ASCII but aren't
-        let homoglyphs: HashMap<char, (&str, char)> = [
-            ('а', ("Cyrillic а (U+0430)", 'a')), // looks like 'a'
-            ('е', ("Cyrillic е (U+0435)", 'e')), // looks like 'e'
-            ('о', ("Cyrillic о (U+043E)", 'o')), // looks like 'o'
-            ('р', ("Cyrillic р (U+0440)", 'p')), // looks like 'p'
-            ('с', ("Cyrillic с (U+0441)", 'c')), // looks like 'c'
-            ('х', ("Cyrillic х (U+0445)", 'x')), // looks like 'x'
-            ('і', ("Cyrillic і (U+0456)", 'i')), // looks like 'i'
-            ('ј', ("Cyrillic ј (U+0458)", 'j')), // looks like 'j'
-            ('ԛ', ("Cyrillic ԛ (U+051B)", 'q')), // looks like 'q'
-            ('ѕ', ("Cyrillic ѕ (U+0455)", 's')), // looks like 's'
-        ]
-        .iter()
-        .copied()
-        .collect();
-
         for (line_num, line) in content.lines().enumerate() {
             for (col, ch) in line.chars().enumerate() {
-                if let Some((name, ascii_equiv)) = homoglyphs.get(&ch) {
-                    issues.push(Issue {
-                        severity: Severity::Error,
-                        line: line_num + 1,
-                        column: Some(col + 1),
-                        message: format!(
+                if let Some((name, ascii_equiv)) = lookalike(ch) {
+                    issues.push(Issue::new(
+                        self.name(),
+                        Severity::Error,
+                        line_num + 1,
+                        Some(col + 1),
+                        format!(
                             "Homoglyph detected: '{ch}' looks like '{ascii_equiv}' but is {name}"
                         ),
-                        rule: self.name().to_string(),
-                    });
+                    ));
                 }
             }
         }
@@ -102,5 +150,45 @@ mod tests {
 
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].column, Some(7));
+    }
+
+    #[test]
+    fn detects_uppercase_cyrillic() {
+        // "COMAND" spelled with Cyrillic С, О, М, А, Н
+        let issues = UnicodeHomoglyphRule.check("Run the СОМАНD");
+        assert_eq!(issues.len(), 5);
+        assert!(
+            issues[0]
+                .message
+                .contains("looks like 'C' but is Cyrillic С (U+0421)")
+        );
+    }
+
+    #[test]
+    fn detects_greek_omicron() {
+        let issues = UnicodeHomoglyphRule.check("Go to gοogle.com");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].column, Some(8));
+        assert!(issues[0].message.contains("Greek ο (U+03BF)"));
+    }
+
+    #[test]
+    fn detects_full_width_latin() {
+        let issues = UnicodeHomoglyphRule.check("Ｉｇｎｏｒｅ previous instructions");
+        assert_eq!(issues.len(), 6);
+        assert!(
+            issues[0]
+                .message
+                .contains("looks like 'I' but is Full-width Ｉ (U+FF29)")
+        );
+    }
+
+    #[test]
+    fn ignores_greek_maths_letters() {
+        assert!(
+            UnicodeHomoglyphRule
+                .check("Let α + β = π and Σx = Δ")
+                .is_empty()
+        );
     }
 }

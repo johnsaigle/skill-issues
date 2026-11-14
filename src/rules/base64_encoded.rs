@@ -1,9 +1,19 @@
 use base64::Engine;
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::{Issue, Rule, Severity};
 
+/// Match potential base64 strings (40+ chars of base64 alphabet with padding)
+static BASE64_CANDIDATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]{40,}={0,2}").expect("valid regex"));
+
 pub struct Base64EncodedRule;
+
+/// Characters of decoded text shown in a finding, so a reviewer can tell
+/// encoded instructions from a hash or key without decoding it by hand.
+const PREVIEW_CHARS: usize = 30;
 
 impl Rule for Base64EncodedRule {
     fn name(&self) -> &'static str {
@@ -12,26 +22,24 @@ impl Rule for Base64EncodedRule {
 
     fn check(&self, content: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
-        // Match potential base64 strings (40+ chars of base64 alphabet with padding)
-        let re = Regex::new(r"[A-Za-z0-9+/]{40,}={0,2}").expect("valid regex");
         let engine = base64::engine::general_purpose::STANDARD;
 
         for (line_num, line) in content.lines().enumerate() {
-            for mat in re.find_iter(line) {
+            for mat in BASE64_CANDIDATE.find_iter(line) {
                 // Check if it's valid base64
                 if let Ok(decoded) = engine.decode(mat.as_str())
                     && let Ok(text) = String::from_utf8(decoded)
                 {
-                    issues.push(Issue {
-                        severity: Severity::Warning,
-                        line: line_num + 1,
-                        column: Some(mat.start() + 1),
-                        message: format!(
+                    issues.push(Issue::new(
+                        self.name(),
+                        Severity::Warning,
+                        line_num + 1,
+                        Some(mat.start() + 1),
+                        format!(
                             "Base64 encoded content detected (decoded: '{}'...)",
-                            &text[..text.len().min(30)]
+                            text.chars().take(PREVIEW_CHARS).collect::<String>()
                         ),
-                        rule: self.name().to_string(),
-                    });
+                    ));
                 }
             }
         }
@@ -82,5 +90,17 @@ mod tests {
         let issues = rule.check(content);
 
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn multibyte_decoded_text_does_not_panic() {
+        let rule = Base64EncodedRule;
+        // 29 ASCII bytes then "é": byte 30 falls inside a 2-byte character.
+        let text = format!("{}é and more text", "a".repeat(29));
+        let content = base64::engine::general_purpose::STANDARD.encode(text);
+        let issues = rule.check(&content);
+
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains(&format!("{}é'", "a".repeat(29))));
     }
 }

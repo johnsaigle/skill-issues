@@ -1,121 +1,64 @@
-use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
 use super::{Issue, Rule, Severity};
 
-/// Calculate Shannon entropy of a string in bits per character
+/// Shannon entropy (bits per character) and chi-square statistic against a
+/// uniform distribution, computed from one pass of byte counts.
+///
+/// `s` must be ASCII, which [`CANDIDATE`] matches always are, so each byte is
+/// one character. A fixed array of counts replaces the per-call hash maps
+/// this used to build, which dominated the rule's run time.
 #[expect(
     clippy::cast_precision_loss,
     reason = "Precision loss at 2^52 is irrelevant for entropy math"
 )]
-fn calculate_entropy(s: &str) -> f64 {
+fn entropy_and_chi_square(s: &str) -> (f64, f64) {
+    debug_assert!(s.is_ascii(), "candidates are ASCII");
     if s.is_empty() {
-        return 0.0;
+        return (0.0, 0.0);
     }
 
-    let mut char_counts: HashMap<char, usize> = HashMap::new();
-    let total_chars = s.chars().count();
-
-    for ch in s.chars() {
-        *char_counts.entry(ch).or_insert(0) += 1;
+    let mut counts = [0_usize; 128];
+    for byte in s.bytes() {
+        counts[usize::from(byte & 0x7F)] += 1;
     }
+
+    let len = s.len() as f64;
+    let present = counts.iter().filter(|&&c| c > 0);
+    let unique = present.clone().count() as f64;
+    let expected = len / unique;
 
     let mut entropy = 0.0;
-    for count in char_counts.values() {
-        let probability = *count as f64 / total_chars as f64;
-        entropy = probability.mul_add(-probability.log2(), entropy);
-    }
-
-    entropy
-}
-
-/// Calculate chi-square statistic for character distribution
-/// Compares observed distribution against expected uniform distribution
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Precision loss at 2^52 is irrelevant for chi-square math"
-)]
-fn calculate_chi_square(s: &str) -> f64 {
-    if s.is_empty() {
-        return 0.0;
-    }
-
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    let mut char_counts: HashMap<char, usize> = HashMap::new();
-
-    for ch in &chars {
-        *char_counts.entry(*ch).or_insert(0) += 1;
-    }
-
-    let unique_chars = char_counts.len();
-    if unique_chars == 0 {
-        return 0.0;
-    }
-
-    let expected = len as f64 / unique_chars as f64;
     let mut chi_square = 0.0;
-
-    for count in char_counts.values() {
-        let diff = *count as f64 - expected;
+    for &count in present {
+        let count = count as f64;
+        let probability = count / len;
+        entropy = probability.mul_add(-probability.log2(), entropy);
+        let diff = count - expected;
         chi_square += (diff * diff) / expected;
     }
-
-    chi_square
+    (entropy, chi_square)
 }
 
-/// Check if a string is likely a legitimate high-entropy pattern
+/// Check if a string is likely a legitimate high-entropy pattern.
+///
+/// Candidates come from [`CANDIDATE`], which excludes `-` and `:`, so UUIDs
+/// and `sha256:`-style prefixes never reach this check; only bare hex digests
+/// and commit hashes need recognising.
 fn is_likely_legitimate(s: &str) -> bool {
-    // UUID pattern
-    if Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-        .expect("valid regex")
-        .is_match(s)
-    {
+    // SHA-256, SHA-1 and MD5 digests
+    if matches!(s.len(), 32 | 40 | 64) && s.chars().all(|c| c.is_ascii_hexdigit()) {
         return true;
     }
-
-    // SHA-256 or similar hashes (64 hex chars)
-    if Regex::new(r"^[0-9a-fA-F]{64}$")
-        .expect("valid regex")
-        .is_match(s)
-    {
-        return true;
-    }
-
-    // SHA-1 (40 hex chars)
-    if Regex::new(r"^[0-9a-fA-F]{40}$")
-        .expect("valid regex")
-        .is_match(s)
-    {
-        return true;
-    }
-
-    // MD5 (32 hex chars)
-    if Regex::new(r"^[0-9a-fA-F]{32}$")
-        .expect("valid regex")
-        .is_match(s)
-    {
-        return true;
-    }
-
-    // Common hash prefixes
-    if s.starts_with("sha256:") || s.starts_with("sha1:") || s.starts_with("md5:") {
-        return true;
-    }
-
-    // Git commit hashes (7-40 hex chars often abbreviated)
-    if Regex::new(r"^[0-9a-f]{7,40}$")
-        .expect("valid regex")
-        .is_match(s)
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-    {
-        return true;
-    }
-
-    false
+    // Git commit hashes (7-40 lowercase hex chars, often abbreviated)
+    (7..=40).contains(&s.len()) && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
+
+/// Long runs of base64-alphabet characters that might be encoded data.
+static CANDIDATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/=]{20,}").expect("valid regex"));
 
 pub struct HighEntropyRule;
 
@@ -127,11 +70,8 @@ impl Rule for HighEntropyRule {
     fn check(&self, content: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
 
-        // Look for long alphanumeric strings that might be encoded
-        let re = Regex::new(r"[A-Za-z0-9+/=]{20,}").expect("valid regex");
-
         for (line_num, line) in content.lines().enumerate() {
-            for mat in re.find_iter(line) {
+            for mat in CANDIDATE.find_iter(line) {
                 let candidate = mat.as_str();
 
                 // Skip if it looks like a legitimate pattern
@@ -139,21 +79,14 @@ impl Rule for HighEntropyRule {
                     continue;
                 }
 
-                let entropy = calculate_entropy(candidate);
-                let chi_square = calculate_chi_square(candidate);
+                let (entropy, chi_square) = entropy_and_chi_square(candidate);
 
                 // High entropy (>4.2 bits/char) and uniform distribution (low chi-square)
                 // indicates encoded/encrypted content
                 if entropy > 4.2 && chi_square < 50.0 {
-                    issues.push(Issue {
-                        severity: Severity::Warning,
-                        line: line_num + 1,
-                        column: Some(mat.start() + 1),
-                        message: format!(
+                    issues.push(Issue::new(self.name(), Severity::Warning, line_num + 1, Some(mat.start() + 1), format!(
                             "High-entropy string detected (entropy: {entropy:.2} bits/char, chi²: {chi_square:.1}) - possible encoded/obfuscated content"
-                        ),
-                        rule: self.name().to_string(),
-                    });
+                        )));
                 }
             }
         }
@@ -218,12 +151,12 @@ mod tests {
     fn calculates_entropy_correctly() {
         // Test with uniform distribution (should be high entropy)
         let uniform = "ABCDEFGHIJ"; // 10 different chars
-        let entropy = calculate_entropy(uniform);
+        let (entropy, _) = entropy_and_chi_square(uniform);
         assert!(entropy > 3.0); // Should be close to log2(10) ≈ 3.32
 
         // Test with low entropy
         let repetitive = "AAAAAAAAAB"; // Mostly same char
-        let entropy_low = calculate_entropy(repetitive);
+        let (entropy_low, _) = entropy_and_chi_square(repetitive);
         assert!(entropy_low < 1.0);
     }
 
@@ -231,12 +164,12 @@ mod tests {
     fn calculates_chi_square_correctly() {
         // Uniform distribution should have low chi-square
         let uniform = "ABCDEFGHIJ";
-        let chi_uniform = calculate_chi_square(uniform);
+        let (_, chi_uniform) = entropy_and_chi_square(uniform);
         assert!(chi_uniform < 10.0);
 
         // Non-uniform should have higher chi-square
         let skewed = "AAAAAAAABC";
-        let chi_skewed = calculate_chi_square(skewed);
+        let (_, chi_skewed) = entropy_and_chi_square(skewed);
         assert!(chi_skewed > chi_uniform);
     }
 

@@ -33,14 +33,13 @@ impl Rule for MixedScriptRule {
                 .filter(|&&x| x)
                 .count();
             if script_count > 1 {
-                issues.push(Issue {
-                    severity: Severity::Warning,
-                    line: line_num + 1,
-                    column: None,
-                    message: "Mixed scripts detected on same line (possible homoglyph attack)"
-                        .to_string(),
-                    rule: self.name().to_string(),
-                });
+                issues.push(Issue::new(
+                    self.name(),
+                    Severity::Warning,
+                    line_num + 1,
+                    None,
+                    "Mixed scripts detected on same line (possible homoglyph attack)".to_string(),
+                ));
             }
         }
         issues

@@ -1,6 +1,7 @@
 use super::{Issue, Rule, Severity};
 
-/// Detects classic Cc control characters (excluding TAB/LF/CR).
+/// Detects classic Cc control characters (excluding TAB/LF, and CR as part
+/// of a CRLF line ending).
 /// Zero-width and other invisible Unicode are handled by `InvisibleCharactersRule`.
 pub struct NonPrintableCharRule {
     /// Also scan for Cc control characters (enabled by --include-cc)
@@ -23,24 +24,27 @@ impl Rule for NonPrintableCharRule {
 
         for (line_num, line) in content.lines().enumerate() {
             for (col, ch) in line.chars().enumerate() {
-                // Check for control characters except standard whitespace (TAB/LF/CR)
-                // This covers C0 (U+0000-U+001F) and C1 (U+0080-U+009F) controls
-                if ch.is_control() && !matches!(ch, '\t' | '\n' | '\r') {
+                // Check for control characters except TAB/LF. This covers C0
+                // (U+0000-U+001F) and C1 (U+0080-U+009F) controls. `lines()`
+                // already strips the CR of a CRLF ending, so any CR left is
+                // mid-line, where it makes a terminal overwrite the text
+                // before it.
+                if ch.is_control() && !matches!(ch, '\t' | '\n') {
                     // When --include-cc is off, only flag the most suspicious ones
-                    // (null byte, backspace, escape, delete)
-                    let is_high_signal = matches!(ch as u32, 0x00 | 0x08 | 0x1B | 0x7F);
+                    // (null byte, backspace, carriage return, escape, delete)
+                    let is_high_signal = matches!(ch as u32, 0x00 | 0x08 | 0x0D | 0x1B | 0x7F);
 
                     if is_high_signal || self.include_cc {
-                        issues.push(Issue {
-                            severity: Severity::Error,
-                            line: line_num + 1,
-                            column: Some(col + 1),
-                            message: format!(
+                        issues.push(Issue::new(
+                            self.name(),
+                            Severity::Error,
+                            line_num + 1,
+                            Some(col + 1),
+                            format!(
                                 "Non-printable control character U+{:04X} detected",
                                 ch as u32
                             ),
-                            rule: self.name().to_string(),
-                        });
+                        ));
                     }
                 }
             }
@@ -111,5 +115,21 @@ mod tests {
         let issues = rule.check(content);
 
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn detects_mid_line_carriage_return() {
+        let rule = NonPrintableCharRule::new();
+        let issues = rule.check("Safe text\rEvil text\n");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].column, Some(10));
+        assert!(issues[0].message.contains("U+000D"));
+    }
+
+    #[test]
+    fn allows_crlf_line_endings() {
+        let rule = NonPrintableCharRule::new();
+        assert!(rule.check("one\r\ntwo\r\nthree").is_empty());
     }
 }

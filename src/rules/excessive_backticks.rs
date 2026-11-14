@@ -1,6 +1,11 @@
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::{Issue, Rule, Severity};
+
+static BACKTICK_RUN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"`{10,}").expect("valid regex"));
 
 pub struct ExcessiveBackticksRule;
 
@@ -11,20 +16,19 @@ impl Rule for ExcessiveBackticksRule {
 
     fn check(&self, content: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
-        let re = Regex::new(r"`{10,}").expect("valid regex");
 
         for (line_num, line) in content.lines().enumerate() {
-            if let Some(mat) = re.find(line) {
-                issues.push(Issue {
-                    severity: Severity::Warning,
-                    line: line_num + 1,
-                    column: Some(mat.start() + 1),
-                    message: format!(
+            if let Some(mat) = BACKTICK_RUN.find(line) {
+                issues.push(Issue::new(
+                    self.name(),
+                    Severity::Warning,
+                    line_num + 1,
+                    Some(mat.start() + 1),
+                    format!(
                         "Excessive backticks ({}), may be trying to break code block parsing",
                         mat.len()
                     ),
-                    rule: self.name().to_string(),
-                });
+                ));
             }
         }
         issues

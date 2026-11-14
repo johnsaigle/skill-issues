@@ -1,6 +1,11 @@
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::{Issue, Rule, Severity};
+
+static PERCENT_ESCAPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"%[0-9A-Fa-f]{2}").expect("valid regex"));
 
 pub struct UrlEncodingRule;
 
@@ -11,20 +16,19 @@ impl Rule for UrlEncodingRule {
 
     fn check(&self, content: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
-        let re = Regex::new(r"%[0-9A-Fa-f]{2}").expect("valid regex");
 
         for (line_num, line) in content.lines().enumerate() {
-            let matches: Vec<_> = re.find_iter(line).collect();
+            let matches: Vec<_> = PERCENT_ESCAPE.find_iter(line).collect();
             if matches.len() >= 3 {
                 // Try to decode
                 let encoded: String = matches.iter().map(regex::Match::as_str).collect();
-                issues.push(Issue {
-                    severity: Severity::Warning,
-                    line: line_num + 1,
-                    column: Some(matches[0].start() + 1),
-                    message: format!("URL-encoded sequence detected: {encoded}"),
-                    rule: self.name().to_string(),
-                });
+                issues.push(Issue::new(
+                    self.name(),
+                    Severity::Warning,
+                    line_num + 1,
+                    Some(matches[0].start() + 1),
+                    format!("URL-encoded sequence detected: {encoded}"),
+                ));
             }
         }
         issues

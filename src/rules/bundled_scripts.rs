@@ -1,6 +1,15 @@
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::{Issue, Rule, Severity};
+
+/// Match common patterns for local script/executable file references.
+/// Covers: relative paths (./ ../ .\), home-relative (~/), Windows drive
+/// letters (C:\), and common absolute system paths (/usr/, /tmp/, etc.).
+static SCRIPT_PATH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:\.{1,2}[/\\]|~/|[A-Za-z]:[/\\]|[/\\](?:home|usr|tmp|etc|var)[/\\])[^\s`'"\)<>]*?\.(?:sh|py|js|rb|pl|bat|ps1|exe|bin|elf|app|cmd|vbs|wsf|jar|php|go|ts|mjs|cjs)\b"#).expect("invalid regex for bundled script pattern")
+});
 
 /// Detects references to local bundled scripts or executables in skill markdown.
 ///
@@ -19,26 +28,19 @@ impl Rule for BundledScriptsRule {
     fn check(&self, content: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
 
-        // Match common patterns for local script/executable file references.
-        // Covers: relative paths (./ ../ .\), home-relative (~/), Windows drive
-        // letters (C:\), and common absolute system paths (/usr/, /tmp/, etc.).
-        let re = Regex::new(
-            r#"(?i)(?:\.{1,2}[/\\]|~/|[A-Za-z]:[/\\]|[/\\](?:home|usr|tmp|etc|var)[/\\])[^\s`'"\)<>]*?\.(?:sh|py|js|rb|pl|bat|ps1|exe|bin|elf|app|cmd|vbs|wsf|jar|php|go|ts|mjs|cjs)\b"#
-        ).expect("invalid regex for bundled script pattern");
-
         for (line_num, line) in content.lines().enumerate() {
-            for mat in re.find_iter(line) {
-                issues.push(Issue {
-                    severity: Severity::Warning,
-                    line: line_num + 1,
-                    column: Some(mat.start()),
-                    message: format!(
+            for mat in SCRIPT_PATH.find_iter(line) {
+                issues.push(Issue::new(
+                    self.name(),
+                    Severity::Warning,
+                    line_num + 1,
+                    Some(mat.start() + 1),
+                    format!(
                         "Reference to bundled script or executable: '{}' — skill may execute \
                          external code not visible to plain-text scanners",
                         mat.as_str()
                     ),
-                    rule: self.name().to_string(),
-                });
+                ));
             }
         }
 
@@ -213,6 +215,12 @@ mod tests {
             "expected at least 2 issues, got {}: {issues:?}",
             issues.len()
         );
+    }
+
+    #[test]
+    fn column_is_one_based() {
+        let issues = check("./run.sh");
+        assert_eq!(issues[0].column, Some(1));
     }
 
     #[test]
